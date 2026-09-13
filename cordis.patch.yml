@@ -1,0 +1,3 @@
+- insert:
+    - id: llm-frontier
+      name: dsh-plugin-frontier-connector

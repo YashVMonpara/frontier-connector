@@ -1,0 +1,66 @@
+{
+  "name": "dsh-plugin-frontier-connector",
+  "version": "0.1.0",
+  "description": "Local Claude and OpenAI subscription chat workspace with a Claude adapter for DeepSeek Harness",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/claude.d.ts",
+      "default": "./dist/claude.js"
+    }
+  },
+  "bin": {
+    "frontier": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "web",
+    "cordis.patch.yml",
+    "connector.example.json",
+    "THIRD_PARTY_LICENSES",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "start": "node dist/cli.js",
+    "web": "npm run build && node dist/cli.js web",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-attachment": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-attachment": "0.1.2-alpha.3",
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YashVMonpara/frontier-connector.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YashVMonpara/frontier-connector/issues"
+  },
+  "homepage": "https://github.com/YashVMonpara/frontier-connector#readme"
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tgz
+.env
+.env.*
+!.env.example
+auth.json
+auth.json.*
+.DS_Store
+
+# Local review artifacts and runtime state
+.lavish/
+*.web-disabled
+*.log
