@@ -162,13 +162,16 @@ test('attachment-backed images are resolved into the request', async () => {
   await collect(adapter.stream(input))
 })
 
-test('DSH plugin registers a configurable route and returns a disposal handle', () => {
-  let disposed = false, cleanup
+test('DSH plugin registers configurable Claude and OpenAI routes with disposal handles', () => {
+  const registered = [], cleanups = []
   const ctx = {
-    llm: { registerAdapter(routes, adapter) { assert.deepEqual(routes, ['frontier']); assert.ok(adapter instanceof ClaudeAdapter); return () => { disposed = true } } },
-    effect(fn) { cleanup = fn() },
+    llm: { registerAdapter(routes, adapter) { registered.push([routes, adapter]); return () => cleanups.push(routes[0]) } },
+    effect(fn) { cleanups.push(fn()) },
   }
-  apply(ctx, { route: 'frontier' })
-  cleanup()
-  assert.equal(disposed, true)
+  apply(ctx, { route: 'frontier', openaiRoute: 'openai-frontier' })
+  assert.deepEqual(registered.map(([routes]) => routes), [['frontier'], ['openai-frontier']])
+  assert.ok(registered[0][1] instanceof ClaudeAdapter)
+  for (const cleanup of cleanups.filter(value => typeof value === 'function')) cleanup()
+  assert.ok(cleanups.includes('frontier'))
+  assert.ok(cleanups.includes('openai-frontier'))
 })

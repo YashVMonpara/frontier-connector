@@ -8,6 +8,7 @@
   <title>Frontier — AI workspace</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/runtime.css">
   <script src="/app.js" type="module"></script>
 </head>
 <body>
@@ -78,9 +79,10 @@
     </section>
     <div id="login-panel" class="login-panel" hidden><strong id="login-title">Finish signing in</strong><p>Continue in your browser. This page updates when you’re connected.</p><a id="login-link" class="primary-button" target="_blank" rel="noopener noreferrer">Continue to sign in</a><details><summary>Callback didn’t return?</summary><label for="login-callback" class="field-label">Paste the full callback URL</label><input id="login-callback" type="password" autocomplete="off" placeholder="http://localhost:…"><button id="submit-callback" class="text-button">Complete sign-in</button></details><button id="cancel-login" class="text-button">Cancel sign-in</button></div>
     <div class="connection-card"><div><strong id="settings-connection">Checking connection</strong><p id="connection-detail">Using the session on this computer.</p></div><button id="refresh-connection" class="icon-button" aria-label="Refresh connections" title="Refresh connections"><svg><use href="#i-refresh"/></svg></button></div>
+    <div class="runtime-card"><span class="runtime-dot"></span><div><strong>DeepSeek Harness agent runtime</strong><p id="runtime-detail">Starting the complete agent runtime…</p></div></div>
     <p class="logout-note">Log out disconnects this app only. Your chats and other apps stay signed in.</p>
     <div id="login-help" hidden></div>
-    <label class="field-label" for="instructions">Custom instructions<span>How would you like Claude to respond?</span></label>
+    <label class="field-label" for="instructions">Custom instructions<span>How would you like the selected agent to respond?</span></label>
     <textarea id="instructions" rows="4" maxlength="20000" placeholder="For example: Be concise. Explain your assumptions."></textarea>
     <div class="settings-grid"><div><label class="field-label" for="max-tokens">Response length</label><select id="max-tokens"><option value="2048">Short · 2k</option><option value="4096" selected>Standard · 4k</option><option value="8192">Long · 8k</option><option value="16384">Extended · 16k</option></select></div><div><label class="field-label" for="effort">Reasoning effort</label><select id="effort"><option value="">Model default</option></select></div></div>
     <label class="field-label" for="custom-model">Custom model ID<span>Optional. Use a model available to your account.</span></label><input id="custom-model" placeholder="e.g. claude-sonnet-5" maxlength="128">
