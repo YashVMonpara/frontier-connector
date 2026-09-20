@@ -1,3 +1,5 @@
+import { RequestError, agentPrompt, providerOf, validateChat } from './http/chat.js'
+import type { Provider } from './http/chat.js'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -14,24 +16,11 @@ import type { LoginAttempt } from './auth/oauth.js'
 import { beginOpenAILogin, openaiStore } from './auth/openai.js'
 import { OpenAIAdapter } from './openai.js'
 import type { OpenAIOptions } from './openai.js'
+import { HARNESS_VERSION, HarnessAgentRuntime } from './agent-runtime.js'
+import type { AgentRuntime } from './agent-runtime.js'
 
-type Provider = 'claude' | 'openai'
-function providerOf(value: unknown): Provider {
-  if (value === undefined) return 'claude'
-  if (value !== 'claude' && value !== 'openai') throw new RequestError('Unknown provider.')
-  return value
-}
 interface LoginJob { state: 'starting' | 'waiting' | 'connected' | 'error'; attempt?: LoginAttempt; error?: string }
 
-
-interface ChatInput {
-  provider?: Provider
-  model: string
-  messages: { role: 'user' | 'assistant'; text: string }[]
-  system?: string
-  maxTokens?: number
-  effort?: string
-}
 
 interface WebOptions {
   port?: number
@@ -39,24 +28,8 @@ interface WebOptions {
   adapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
   openaiAdapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
   loginFactory?: (provider: Provider) => Promise<LoginAttempt>
-}
-
-class RequestError extends Error {
-  constructor(message: string, readonly status = 400) { super(message) }
-}
-
-function validateChat(value: unknown): ChatInput {
-  if (!value || typeof value !== 'object') throw new RequestError('Invalid chat request.')
-  const input = value as ChatInput
-  providerOf(input.provider)
-  if (typeof input.model !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(input.model)) throw new RequestError('Choose a valid model ID.')
-  if (!Array.isArray(input.messages) || !input.messages.length || input.messages.length > 200) throw new RequestError('A conversation must contain between 1 and 200 messages. Start a new chat for a longer conversation.')
-  if (input.messages.some(m => !m || !['user', 'assistant'].includes(m.role) || typeof m.text !== 'string' || !m.text.trim() || m.text.length > 100_000)) throw new RequestError('Messages must contain text, with at most 100,000 characters each.')
-  if (input.messages[0].role !== 'user' || input.messages.at(-1)?.role !== 'user') throw new RequestError('The conversation must begin and end with your message.')
-  if (input.system !== undefined && (typeof input.system !== 'string' || input.system.length > 20_000)) throw new RequestError('Instructions must be under 20,000 characters.')
-  if (input.maxTokens !== undefined && (!Number.isInteger(input.maxTokens) || input.maxTokens < 1 || input.maxTokens > 32768)) throw new RequestError('Response length must be between 1 and 32,768 tokens.')
-  if (input.effort !== undefined && (typeof input.effort !== 'string' || input.effort.length > 32)) throw new RequestError('Invalid reasoning effort.')
-  return input
+  /** `false` retains the adapter-only path for embedding/tests. */
+  agentRuntime?: AgentRuntime | false
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -99,6 +72,7 @@ export async function startWebServer(options: WebOptions = {}) {
   const openaiConfig = { ...config.openai, authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined) }
   const openai = options.openaiAdapter ?? new OpenAIAdapter(openaiConfig)
   const adapters = { claude: adapter, openai }
+  const agentRuntime = options.agentRuntime === false ? undefined : options.agentRuntime ?? new HarnessAgentRuntime()
   const stores = { claude: store, openai: openaiStore(openaiConfig.authFile) }
   if (stores.claude.path === stores.openai.path) throw new Error('Claude and OpenAI require separate credential files.')
   const logins = new Map<Provider, LoginJob>()
@@ -115,6 +89,7 @@ export async function startWebServer(options: WebOptions = {}) {
     ['/', ['index.html', 'text/html; charset=utf-8']],
     ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
     ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
+    ['/runtime.css', ['runtime.css', 'text/css; charset=utf-8']],
     ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
   ])
   let origin = ''
@@ -159,7 +134,10 @@ export async function startWebServer(options: WebOptions = {}) {
               login: login ? { state: login.state, error: login.error } : null }
           } catch (error) { providers[provider] = { connected: false, mode: modeOf(provider), models: [], error: error instanceof Error ? error.message : 'Connection unavailable.' } }
         }
-        json(res, { csrf, ...providers.claude, providers })
+        json(res, { csrf, ...providers.claude, providers, agentRuntime: {
+          enabled: Boolean(agentRuntime), profile: agentRuntime ? 'sdk' : null, version: agentRuntime ? HARNESS_VERSION : null,
+          capabilities: agentRuntime ? ['agent-loop', 'filesystem', 'shell', 'skills', 'goals', 'subagents', 'compaction'] : [],
+        } })
         return
       }
       const routes = ['/api/chat', '/api/usage', '/api/auth/login', '/api/auth/logout', '/api/auth/cancel', '/api/auth/callback']
@@ -178,6 +156,7 @@ export async function startWebServer(options: WebOptions = {}) {
           if (path === '/api/auth/cancel' && job && ['starting', 'waiting'].includes(job.state)) await target.clear()
           if (path === '/api/auth/logout') {
             for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
+            await agentRuntime?.disconnect?.(provider)
             // Persist disabling for API-key mode without modifying environment secrets.
             await atomicPrivateWrite(`${target.path}.web-disabled`, true)
             await target.clear()
@@ -221,6 +200,28 @@ export async function startWebServer(options: WebOptions = {}) {
       res.once('close', disconnect)
       active++; streams.set(abort, provider)
       try {
+        res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'x-accel-buffering': 'no' })
+        res.flushHeaders()
+        if (agentRuntime) {
+          if (!input.sessionId) throw new RequestError('Refresh the page to start an agent session.')
+          const activityWrites: Promise<void>[] = []
+          const result = await agentRuntime.run({
+            sessionId: input.sessionId, provider, model: input.model,
+            prompt: agentPrompt(input), maxTokens: input.maxTokens,
+            effort: input.effort, signal: abort.signal,
+            onActivity: event => {
+              activityWrites.push(send(res, { type: 'agent-event', event }, abort.signal).catch(error => {
+                if (!abort.signal.aborted) abort.abort(error)
+              }))
+            },
+          })
+          await Promise.all(activityWrites)
+          abort.signal.throwIfAborted()
+          if (!result.text) throw new Error('The DeepSeek Harness agent completed without a final response.')
+          await send(res, { type: 'text-delta', index: 0, text: result.text }, abort.signal)
+          await send(res, { type: 'finish', reason: { kind: 'stop' } }, abort.signal)
+          return
+        }
         const request: GenerateOptions = {
           provider, model: input.model, signal: abort.signal,
           system: input.system, maxTokens: input.maxTokens ?? 4096,
@@ -229,8 +230,6 @@ export async function startWebServer(options: WebOptions = {}) {
             ? createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: m.text }] })
             : createAssistantMessage({ source: { provider, model: input.model }, content: [{ type: 'text', text: m.text }] })),
         }
-        res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'x-accel-buffering': 'no' })
-        res.flushHeaders()
         for await (const chunk of adapters[provider].stream(request)) {
           await send(res, chunk, abort.signal)
         }
@@ -245,7 +244,7 @@ export async function startWebServer(options: WebOptions = {}) {
       else res.end()
     }
   })
-  server.on('close', () => { for (const job of logins.values()) job.attempt?.cancel(); logins.clear(); for (const controller of streams.keys()) controller.abort() })
+  server.on('close', () => { for (const job of logins.values()) job.attempt?.cancel(); logins.clear(); for (const controller of streams.keys()) controller.abort(); void agentRuntime?.close() })
   server.requestTimeout = 30_000
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

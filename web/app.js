@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id)
 const STORE = 'frontier.workspace.v1'
 const defaults = { provider: 'claude', system: '', maxTokens: 4096, effort: '', model: '' }
 let conversations = [], activeId, connection = { connected: false, models: [] }, busy = false, requestController, pendingDelete
-let providerStates = {}, loginProvider, authPoll
+let providerStates = {}, loginProvider, authPoll, runtimeStatus = { enabled: false, capabilities: [] }
 const providerName = p => p === 'openai' ? 'OpenAI' : 'Claude'
 let renderQueued = false, toastTimer, storageWarned = false
 const uid = () => crypto.randomUUID()
@@ -86,6 +86,53 @@ function markdown(text) {
   }
   return fragment
 }
+function prettyArguments(value) {
+  try { return JSON.stringify(JSON.parse(value), null, 2) } catch { return value || '{}' }
+}
+function activityNode(message) {
+  const events = Array.isArray(message.activity) ? message.activity.filter(event => event && typeof event === 'object' && typeof event.kind === 'string').slice(0, 100) : []
+  if (!events.length) return
+  const tools = events.filter(event => event.kind === 'tool-call')
+  const details = element('details', 'agent-activity')
+  details.open = message.status === 'streaming'
+  const summary = element('summary')
+  summary.append(element('span', 'activity-pulse'), element('strong', '', message.status === 'streaming' ? 'Harness is working' : 'Harness activity'),
+    element('span', 'activity-count', `${tools.length} tool ${tools.length === 1 ? 'call' : 'calls'}`))
+  details.append(summary)
+  const timeline = element('div', 'activity-timeline')
+  for (const event of events) {
+    if (event.kind === 'step-start') {
+      timeline.append(element('div', 'activity-line', `Step ${event.step} · model planning`))
+      continue
+    }
+    if (event.kind === 'tool-call') {
+      const result = events.find(candidate => candidate.kind === 'tool-result' && candidate.callId === event.callId)
+      const card = element('div', `tool-card ${result?.isError ? 'failed' : ''}`)
+      const heading = element('div', 'tool-heading')
+      heading.append(element('span', 'tool-badge', 'TOOL'), element('code', 'tool-name', event.name),
+        element('span', `tool-state ${result ? result.isError ? 'error' : 'done' : 'running'}`, result ? result.isError ? 'Error' : 'Done' : 'Running'))
+      card.append(heading)
+      if (event.arguments) {
+        const label = element('div', 'tool-section-label', 'Input'), pre = element('pre', 'tool-payload')
+        pre.append(element('code', '', prettyArguments(event.arguments))); card.append(label, pre)
+      }
+      if (result) {
+        const label = element('div', 'tool-section-label', result.isError ? 'Error output' : 'Output'), pre = element('pre', 'tool-payload tool-output')
+        pre.append(element('code', '', result.output || '(No output)')); card.append(label, pre)
+      }
+      timeline.append(card); continue
+    }
+    if (event.kind === 'tool-result') {
+      if (!events.some(candidate => candidate.kind === 'tool-call' && candidate.callId === event.callId)) timeline.append(element('div', 'activity-line', `Tool result · ${event.isError ? 'error' : 'complete'}`))
+      continue
+    }
+    if (event.kind === 'retry') { timeline.append(element('div', 'activity-line warning', `Model retry ${event.attempt} · ${event.message}`)); continue }
+    if (event.kind === 'subagent-started') { timeline.append(element('div', 'activity-line', `Subagent started · ${event.childSessionId}`)); continue }
+    if (event.kind === 'subagent-finished') timeline.append(element('div', 'activity-line', `Subagent ${event.status} · ${event.childSessionId}`))
+  }
+  details.append(timeline)
+  return details
+}
 const mobile = matchMedia('(max-width: 760px)')
 function sidebar(open) { $('sidebar').classList.toggle('open', open); $('sidebar-backdrop').hidden = !open; $('sidebar').inert = mobile.matches && !open; $('menu-button').setAttribute('aria-expanded', String(open)); if (!open && mobile.matches) $('menu-button').focus() }
 mobile.addEventListener('change', () => { $('sidebar').inert = mobile.matches && !$('sidebar').classList.contains('open'); if (!mobile.matches) $('sidebar-backdrop').hidden = true })
@@ -125,10 +172,11 @@ function messageNode(m, index) {
   heading.append(mark, element('strong', '', providerName(m.provider || 'claude')))
   if (m.model) heading.append(element('span', '', (providerStates[m.provider || 'claude']?.models || connection.models).find(model => model.id === m.model)?.name?.replace('Claude ', '') || m.model.replace('claude-', '')))
   article.append(heading)
+  const activity = activityNode(m); if (activity) article.append(activity)
   if (m.reasoning) { const details = element('details', 'reasoning'); details.append(element('summary', '', m.status === 'streaming' ? 'Thinking…' : 'Reasoning summary'), element('p', '', m.reasoning)); article.append(details) }
   const body = element('div', 'message-body')
   if (m.text) body.append(markdown(m.text))
-  else if (m.status === 'streaming') { const typing = element('div', 'typing'); typing.setAttribute('aria-label', 'Claude is responding'); typing.append(element('span'), element('span'), element('span')); body.append(typing) }
+  else if (m.status === 'streaming') { const typing = element('div', 'typing'); typing.setAttribute('aria-label', 'The agent is working'); typing.append(element('span'), element('span'), element('span')); body.append(typing) }
   article.append(body)
   if (m.error) article.append(element('div', 'message-error', m.error))
   if (m.status !== 'streaming') {
@@ -154,14 +202,14 @@ function updateControls() {
   $('send-button').disabled = busy || !connection.connected || !$('prompt').value.trim() || !$('model').value
   $('send-button').hidden = busy; $('stop-button').hidden = !busy; $('model').disabled = busy || !connection.connected
   $('new-chat').disabled = busy; $('provider').disabled = busy
-  $('response-status').textContent = busy ? `${providerName(current().settings.provider)} is responding…` : 'Conversations stay in this browser.'
+  $('response-status').textContent = busy ? `${providerName(current().settings.provider)} agent is working…` : 'Conversations stay in this browser.'
 }
 function selectConnection() {
   const provider = current().settings.provider || 'claude'
   connection = { connected: false, models: [], ...providerStates[provider], csrf: connection.csrf }
   const name = providerName(provider)
   $('connection-status').className = `connection-status ${connection.connected ? 'connected' : 'disconnected'}`
-  $('connection-status').lastElementChild.textContent = connection.connected ? `${name} connected` : `${name} not connected`
+  $('connection-status').lastElementChild.textContent = connection.connected ? `${name}${runtimeStatus.enabled ? ' · DSH agent' : ''}` : `${name} not connected`
   $('sidebar-status').textContent = `${Object.values(providerStates).filter(p => p.connected).length} of 2 connected`
   $('settings-connection').textContent = connection.connected ? `${name} connected` : `Connect ${name} to chat`
   $('connection-detail').textContent = connection.error || connection.modelError || (connection.connected
@@ -179,7 +227,10 @@ async function connect() {
   try {
     const response = await fetch('/api/status'), value = await response.json()
     if (!response.ok) throw new Error(value.error || 'Connection unavailable')
-    connection.csrf = value.csrf; providerStates = value.providers || { claude: value }
+    connection.csrf = value.csrf; providerStates = value.providers || { claude: value }; runtimeStatus = value.agentRuntime || { enabled: false, capabilities: [] }
+    $('runtime-detail').textContent = runtimeStatus.enabled
+      ? `v${runtimeStatus.version} · SDK profile · Files, shell, skills, goals, subagents, and compaction enabled.`
+      : 'Adapter-only mode is active.'
     for (const provider of ['claude', 'openai']) {
       const state = providerStates[provider] || {}, waiting = ['starting', 'waiting'].includes(state.login?.state)
       $(`${provider}-auth-status`).textContent = state.error || state.login?.error || (waiting ? 'Waiting for sign-in…' : state.connected ? (provider === 'openai' ? 'ChatGPT subscription connected' : 'Connected') : 'Not connected')
@@ -242,17 +293,20 @@ async function regenerate() {
   if (busy) return
   const chat = current(), index = chat.messages.findLastIndex(m => m.role === 'user')
   if (index < 0) return
-  chat.messages = chat.messages.slice(0, index + 1); await generate(chat)
+  chat.messages = chat.messages.slice(0, index + 1); delete chat.agent; await generate(chat)
 }
 async function generate(chat) {
   const outgoing = chat.messages.filter(m => m.text.trim()).map(m => ({ role: m.role, text: m.text }))
-  const answer = { id: uid(), role: 'assistant', text: '', reasoning: '', status: 'streaming', model: chat.settings.model, provider: chat.settings.provider }
+  const route = [chat.settings.provider, chat.settings.model, chat.settings.effort, chat.settings.maxTokens].join(':')
+  if (!chat.agent || chat.agent.route !== route) chat.agent = { sessionId: `frontier_${uid().replaceAll('-', '')}`, route, ready: false }
+  const bootstrap = !chat.agent.ready
+  const answer = { id: uid(), role: 'assistant', text: '', reasoning: '', activity: [], status: 'streaming', model: chat.settings.model, provider: chat.settings.provider }
   chat.messages.push(answer); busy = true; requestController = new AbortController(); persist(); renderConversation()
   let finished = false
   try {
     const response = await fetch('/api/chat', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': connection.csrf }, signal: requestController.signal,
-      body: JSON.stringify({ provider: chat.settings.provider, model: chat.settings.model, messages: outgoing, system: chat.settings.system, maxTokens: chat.settings.maxTokens, effort: chat.settings.effort || undefined }),
+      body: JSON.stringify({ provider: chat.settings.provider, sessionId: chat.agent.sessionId, bootstrap, model: chat.settings.model, messages: outgoing, system: chat.settings.system, maxTokens: chat.settings.maxTokens, effort: chat.settings.effort || undefined }),
     })
     if (!response.ok) { const problem = await response.json(); throw new Error(problem.error || `Request failed (${response.status})`) }
     if (!response.body) throw new Error('No response stream was returned.')
@@ -263,6 +317,7 @@ async function generate(chat) {
       if (chunk.type === 'text-delta') answer.text += chunk.text
       if (chunk.type === 'reasoning-delta') answer.reasoning += chunk.text
       if (chunk.type === 'usage') answer.usage = chunk.usage
+      if (chunk.type === 'agent-event' && answer.activity.length < 100) answer.activity.push(chunk.event)
       if (chunk.type === 'error') throw new Error(chunk.message)
       if (chunk.type === 'finish') {
         if (chunk.reason.kind === 'error') throw new Error(chunk.reason.failure.message)
@@ -282,8 +337,9 @@ async function generate(chat) {
       }
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
     if (!finished) throw new Error('The connection ended before the response finished. You can try again.')
-    answer.status = 'complete'
+    answer.status = 'complete'; chat.agent.ready = true
   } catch (error) {
+    if (bootstrap) delete chat.agent
     if (error.name === 'AbortError' || requestController.signal.aborted) answer.status = 'stopped'
     else { answer.status = 'error'; answer.error = error.message || 'Something went wrong. Try again.' }
   } finally {

@@ -1,0 +1,7 @@
+# Mount the subscription adapters inside the complete DeepSeek Harness SDK profile.
+- insert:
+    - id: llm-frontier
+      name: ./dist/index.js
+      config:
+        route: claude
+        openaiRoute: openai

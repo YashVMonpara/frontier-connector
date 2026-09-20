@@ -1,0 +1,67 @@
+.runtime-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 15px;
+  border: 1px solid #dfe7d5;
+  background: #fbfdf8;
+  border-radius: 10px;
+  margin: -10px 0 18px;
+}
+
+.runtime-card .runtime-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #7da23f;
+  box-shadow: 0 0 0 4px #c7e99a35;
+  flex: none;
+}
+
+.runtime-card strong { font-size: 13px; font-weight: 600; }
+.runtime-card p { font-size: 12px; line-height: 1.55; color: #7a8773; margin: 4px 0 0; }
+
+.agent-activity {
+  margin: 0 0 18px;
+  border: 1px solid #dfe5e7;
+  border-radius: 12px;
+  background: #f8faf7;
+  overflow: hidden;
+  color: #66716b;
+}
+
+.agent-activity summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+
+.agent-activity summary::-webkit-details-marker { display: none; }
+.agent-activity summary strong { color: #4f5c53; font-size: 13px; font-weight: 600; }
+.activity-count { margin-left: auto; color: #8b9690; }
+.activity-pulse { width: 7px; height: 7px; border-radius: 50%; background: #91b350; box-shadow: 0 0 0 4px #c7f36b25; }
+.agent-activity[open] .activity-pulse { animation: activity-glow 1.5s ease-in-out infinite; }
+.activity-timeline { display: grid; gap: 9px; border-top: 1px solid #e3e8e2; padding: 11px; }
+.activity-line { border-left: 2px solid #c4d2b6; padding: 3px 9px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.activity-line.warning { border-left-color: #d9a85c; color: #8c6839; }
+.tool-card { min-width: 0; border: 1px solid #dfe5df; border-radius: 9px; background: white; overflow: hidden; }
+.tool-card.failed { border-color: #efd8ca; }
+.tool-heading { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 11px; }
+.tool-badge { font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #5c713f; background: #eaf2dc; border-radius: 4px; padding: 3px 5px; }
+.tool-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #39453e; font: 12px "SFMono-Regular",Consolas,monospace; white-space: nowrap; }
+.tool-state { margin-left: auto; font-size: 10px; white-space: nowrap; }
+.tool-state.running { color: #8d733e; }
+.tool-state.done { color: #648441; }
+.tool-state.error { color: #a05f47; }
+.tool-section-label { padding: 7px 11px 0; border-top: 1px solid #edf0ed; color: #96a099; font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.tool-payload { max-height: 190px; overflow: auto; margin: 0; padding: 7px 11px 11px; background: white; color: #48534d; font: 11px/1.6 "SFMono-Regular",Consolas,monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-payload code { font: inherit; white-space: pre-wrap; }
+.tool-output { max-height: 260px; color: #59635d; }
+
+@keyframes activity-glow { 50% { opacity: .45; transform: scale(.82); } }
+@media(prefers-reduced-motion:reduce) { .agent-activity[open] .activity-pulse { animation: none; } }

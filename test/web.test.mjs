@@ -4,7 +4,7 @@ import { get } from 'node:http'
 import { startWebServer } from '../dist/web-server.js'
 import { fixture, session } from './helpers.mjs'
 
-async function web(t, overrides = {}) {
+async function web(t, overrides = {}, agentRuntime = false) {
   const { store } = await fixture(t)
   await store.save(session())
   const calls = []
@@ -19,7 +19,7 @@ async function web(t, overrides = {}) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     }, ...overrides,
   }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, agentRuntime })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (body, headers = {}) => fetch(`${url}/api/chat`, {
@@ -90,4 +90,33 @@ test('disconnecting the web stream cancels the provider request', async t => {
   const response = await post(prompt), reader = response.body.getReader()
   await reader.read(); await reader.cancel()
   await Promise.race([stopped, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Provider was not cancelled')), 1500); timer.unref() })])
+})
+
+test('web chat runs through the complete agent runtime when enabled', async t => {
+  const calls = []
+  const runtime = {
+    async run(input) {
+      calls.push(input)
+      input.onActivity({ kind: 'tool-call', sessionId: input.sessionId, callId: 'call-1', name: 'read', arguments: '{"file_path":"package.json"}' })
+      input.onActivity({ kind: 'tool-result', sessionId: input.sessionId, callId: 'call-1', output: 'package contents', isError: false })
+      return { text: 'Agent completed the task', events: [{ type: 'tool/result' }] }
+    },
+    async close() {},
+  }
+  const { post, status } = await web(t, {}, runtime)
+  assert.equal(status.agentRuntime.enabled, true)
+  assert.ok(status.agentRuntime.capabilities.includes('agent-loop'))
+  const response = await post({
+    ...prompt, sessionId: 'frontier_test_session', bootstrap: true, system: 'Be concise',
+    messages: [{ role: 'user', text: 'Earlier' }, { role: 'assistant', text: 'Context' }, { role: 'user', text: 'Do the task' }],
+  })
+  const chunks = (await response.text()).trim().split('\n').map(JSON.parse)
+  assert.equal(chunks[0].type, 'agent-event')
+  assert.equal(chunks[0].event.name, 'read')
+  assert.equal(chunks[1].event.output, 'package contents')
+  assert.equal(chunks[2].text, 'Agent completed the task')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(calls[0].sessionId, 'frontier_test_session')
+  assert.match(calls[0].prompt, /Earlier conversation imported/)
+  assert.match(calls[0].prompt, /Current user request:\nDo the task/)
 })

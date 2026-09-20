@@ -2,7 +2,7 @@ import { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { OpenAITokens, openaiStore } from './auth/openai.js'
 import type { Fetch } from './auth/oauth.js'
-import { streamResponses, toResponsesInput } from './translate/responses.js'
+import { streamResponses, toResponsesInput, toResponsesTools } from './translate/responses.js'
 import { idleWatchdog } from './transport.js'
 
 export interface OpenAIOptions { authFile?: string; fetchFn?: Fetch; streamIdleTimeoutMs?: number; clientVersion?: string }
@@ -51,6 +51,7 @@ export class OpenAIAdapter extends LlmAdapter {
     const resolved = toResponsesInput(options.messages, options.system)
     const body = { model: options.model, instructions: resolved.instructions || 'You are a helpful assistant.', input: resolved.input,
       stream: true, store: false, include: ['reasoning.encrypted_content'],
+      ...(options.tools?.length ? { tools: toResponsesTools(options.tools, { strict: false }), parallel_tool_calls: true } : {}),
       ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort, summary: 'auto' } } : {}),
     }
     // Codex subscription requests do not accept max_output_tokens.

@@ -33,7 +33,9 @@ After connecting, start the browser interface:
 npm run web
 ```
 
-Open **http://127.0.0.1:4317**. The app reuses your connector session and provides streamed multi-turn chat, model selection, Markdown/code rendering, copy and regenerate actions, stop controls, custom instructions, and subscription usage. Conversations and settings stay in this browser's local storage; credentials stay in the Node process. Clearing browser storage clears those conversations.
+Open **http://127.0.0.1:4317**. The app reuses your connector session and starts the complete DeepSeek Harness SDK profile behind each browser conversation. The selected Claude or OpenAI model can use the Harness agent loop, files, shell, skills, goals, subagents, durable sessions, and compaction. An expandable **Harness activity** trace updates while the agent works, showing each step, tool name, input, output or error, model retry, and subagent lifecycle event. Internal system-prompt and credential events stay server-side. The final response appears when the agent reaches idle. The interface also provides model selection, Markdown/code rendering, copy and regenerate actions, stop controls, custom instructions, and subscription usage.
+
+Browser conversations and settings stay in local storage. DSH session logs stay under `~/.config/frontier-connector/harness`; credentials stay in the Node processes. Clearing browser storage removes its conversation list. Stopping a response closes that conversation's agent process because the current SDK protocol has no mid-turn cancel message; the next attempt starts a fresh runtime and imports the visible chat transcript.
 
 Open **Connections** to connect Claude or OpenAI using browser sign-in. Select the provider beside the model picker before sending a message. OpenAI uses your ChatGPT subscription connection and discovers the models available to that account. Its response-length control is disabled because the subscription endpoint does not accept that setting.
 
@@ -46,7 +48,7 @@ npm run web -- --config connector.example.json
 npm run web -- --api-key --port 4320
 ```
 
-The interface is a local, text-chat workspace. Tool execution and image attachments remain available through the DSH adapter, not through this web UI. It binds only to `127.0.0.1`; remote hosting requires a separate authentication and deployment design.
+The interface is a local, text-chat workspace with full DSH tool execution. Tools operate under the Harness `workspace-write` sandbox rooted at the directory where Frontier starts. The SDK transport cannot show interactive Harness approval requests, so operations that require an unavailable approval fail closed. The browser does not yet provide image upload controls. The server binds only to `127.0.0.1`; remote hosting requires a separate authentication and deployment design.
 
 ## CLI commands
 
@@ -70,7 +72,7 @@ API-key mode reads `ANTHROPIC_API_KEY` from the environment. It does not fall ba
 
 ## DSH plugin
 
-This package targets the published `@deepseek-ai/dsh-llm@0.1.2-alpha.3` contract and `@deepseek-ai/cordis@4.0.2`. It registers route `claude`; choose a different route if another adapter already owns it.
+This package targets DeepSeek Harness `0.1.5-rc.2` and `@deepseek-ai/cordis@4.0.2`. It registers `claude` and `openai` routes; configure `route` or `openaiRoute` if another adapter already owns either name.
 
 Build and install the local package into your compatible DSH profile:
 
@@ -79,7 +81,7 @@ npm pack
 dsh plugin --profile web add ./dsh-plugin-frontier-connector-0.1.0.tgz
 ```
 
-The included `cordis.patch.yml` mounts the plugin. Authenticate through the CLI under the same operating-system user as DSH. Restart the profile after changing login state if its model picker caches the prior list. The standalone web app provides connection settings; the DSH host manages its own interface.
+The included `cordis.patch.yml` mounts the plugin. `frontier-agent.patch.yml` is the overlay used by the web app's SDK runtime. Authenticate under the same operating-system user as DSH. Restart a separately hosted profile after changing login state if its model picker caches the prior list.
 
 For a manually managed composition, configure the plugin entry with:
 
@@ -87,6 +89,7 @@ For a manually managed composition, configure the plugin entry with:
 - name: dsh-plugin-frontier-connector
   config:
     route: claude
+    openaiRoute: openai
     authMode: subscription
     streamIdleTimeoutMs: 60000
     maxRateLimitWaitMs: 60000
@@ -115,4 +118,3 @@ for await (const chunk of adapter.stream({
   if (chunk.type === 'text-delta') process.stdout.write(chunk.text)
 }
 ```
-

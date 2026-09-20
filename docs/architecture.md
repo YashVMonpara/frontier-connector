@@ -1,17 +1,20 @@
 # Implementation map
 
-`src/index.ts` registers the `ClaudeAdapter` with DSH and disposes its registration when the plugin unloads. `src/cli.ts` provides explicit auth commands and one-turn streaming without a running DSH profile.
+`src/index.ts` registers the Claude and OpenAI adapters with DSH and disposes both registrations when the plugin unloads. `src/runtime/harness.ts` owns one official SDK-profile subprocess per active browser conversation, exported through the stable `src/agent-runtime.ts` facade. `src/runtime/activity.ts` translates SDK notifications into bounded UI events. `src/http/chat.ts` validates incoming conversations and constructs agent prompts. `src/cli.ts` provides explicit Claude auth commands and one-turn streaming without a running DSH profile.
 
 ```text
-DSH registerAdapter / CLI
-       |
-       v
+Browser -> HarnessAgentRuntime -> `dsh --profile sdk`
+                              |-- agent loop / tools / sandbox / sessions
+                              |-- skills / goals / subagents / compaction
+                              `-- ClaudeAdapter or OpenAIAdapter
+
 ClaudeAdapter
   |-- TokenManager -> locked TokenStore -> refresh grant / linked source
-  |-- resolveImages -> message + tool + system translation
-  |-- POST /v1/messages -> SSE framing -> DSH StreamChunks
-  |-- GET /v1/models (optional discovery)
-  `-- GET /api/oauth/usage (subscription only)
+  `-- Anthropic messages -> SSE -> DSH StreamChunks
+
+OpenAIAdapter
+  |-- OpenAITokens -> locked provider-specific store -> refresh grant
+  `-- Responses input + function tools -> SSE -> DSH StreamChunks
 ```
 
 ## Files
@@ -35,7 +38,7 @@ ClaudeAdapter
 - Keychain imports are read-only at the source; Claude Code owns their refresh. File imports synchronize rotations back while preserving unrelated fields. A compare-before-write check detects an already-changed token, but cannot provide an atomic transaction with the official CLI.
 - The default rate-limit waiting budget is one minute and one retry, configurable. No unknown reset is guessed. Transport errors, 5xx errors, and in-band SSE errors are surfaced without automatic replay.
 - HTTP 401s can be retried before streaming starts. An error after chunks were emitted ends that stream to avoid duplicated visible content or tool calls.
-- The standalone CLI displays tool calls; DSH executes them. No local HTTP gateway is exposed.
+- The standalone CLI displays tool calls; the embedded web runtime and externally hosted DSH profiles execute them.
 - API-key mode uses a distinct header and system-prompt path. It never silently substitutes for subscription auth.
 
 ## Provenance
@@ -44,4 +47,6 @@ ClaudeAdapter
 
 ## Local web providers
 
-`web-server.ts` serves the local interface and routes requests to independent Claude and OpenAI adapters. `auth/openai.ts` implements ChatGPT OAuth and locked token refresh; `openai.ts` discovers account models and translates the subscription Responses stream. Each provider has a separate credential store and logout state. The web app does not execute tool calls.
+`web-server.ts` serves the local interface and sends each chat turn to `HarnessAgentRuntime`. That manager starts the official `sdk` profile with `frontier-agent.patch.yml`, pins the chosen provider/model route, and reuses its durable session across turns. The profile owns the agent loop, file and shell tools, sandbox policy, skills, goals, subagents, and compaction. Stopping a turn reaps that conversation's subprocess because SDK `0.1.5-rc.2` has no mid-turn cancel method.
+
+`auth/openai.ts` implements ChatGPT OAuth and locked token refresh; `openai.ts` discovers account models, maps Harness function schemas into Responses tools, and translates text, reasoning, function calls, usage, and terminal events back into DSH stream chunks. Each provider has a separate credential store and logout state. Logging out also closes that provider's resident Harness processes so credentials do not remain in an idle child.

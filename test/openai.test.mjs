@@ -51,7 +51,7 @@ test('web routes OpenAI separately and logout preserves the other provider', asy
   const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
   await store.save(session()); await target.save(session({ accountId: 'account' }))
   const adapter = { listModels: async () => [], resolveModel: async (_, id) => ({ id }), usage: async () => ({}), async *stream() { yield { type: 'text-delta', index: 0, text: 'OpenAI response' }; yield { type: 'finish', reason: { kind: 'stop' } } } }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, openaiAdapter: adapter })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, openaiAdapter: adapter, agentRuntime: false })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (path, body, token = status.csrf) => fetch(`${url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': token }, body: JSON.stringify(body) })
@@ -88,4 +88,31 @@ test('OpenAI rejects a non-SSE response even with a successful HTTP status', asy
   await target.save(session({ accountId: 'account' }))
   const adapter = new OpenAIAdapter({ authFile: target.path, fetchFn: async () => Response.json({ unexpected: true }) })
   await assert.rejects(collect(adapter.stream(options({ provider: 'openai' }))), /before response.completed/)
+})
+
+test('OpenAI sends Harness tools as non-strict Responses functions', async t => {
+  const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
+  await target.save(session({ accountId: 'account' }))
+  let body
+  const events = [
+    { type: 'response.output_item.added', item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'read' } },
+    { type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '{"file_path":"probe.txt"}' },
+    { type: 'response.output_item.done', item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'read', arguments: '{"file_path":"probe.txt"}' } },
+    { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+  ]
+  const adapter = new OpenAIAdapter({ authFile: target.path, fetchFn: async (_, init) => {
+    body = JSON.parse(init.body)
+    return new Response(bytes(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))
+  } })
+  const chunks = await collect(adapter.stream(options({
+    provider: 'openai',
+    tools: [{ name: 'read', description: 'Read a text file.', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] } }],
+  })))
+  assert.equal(body.parallel_tool_calls, true)
+  assert.deepEqual(body.tools, [{
+    type: 'function', name: 'read', description: 'Read a text file.',
+    parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] }, strict: false,
+  }])
+  assert.equal(chunks.find(chunk => chunk.type === 'block-end').block.type, 'tool-call')
+  assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
 })
