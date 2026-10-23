@@ -2,28 +2,34 @@
 import { parseArgs } from 'node:util'
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
+import { resolve } from 'node:path'
 import { ReasoningEffortId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ClaudeAdapter, DEFAULT_MODELS } from './claude.js'
 import type { ConnectorOptions } from './claude.js'
 import { TokenStore } from './auth/store.js'
 import { beginLogin } from './auth/oauth.js'
+import { beginOpenAILogin, openaiStore } from './auth/openai.js'
+import { OpenAIAdapter } from './openai.js'
+import type { OpenAIOptions } from './openai.js'
 import { importClaudeCode } from './auth/source.js'
 
-const help = `Frontier connector — Claude subscription / API-key adapter
+const help = `Frontier connector — Claude & OpenAI subscription / API-key workspace adapter
 
 Usage (after npm run build):
-  npm start -- auth login                   Browser OAuth login
-  npm start -- auth import [--file PATH]    Link an existing Claude Code session
-  npm start -- auth status                  Show expiry and source, never tokens
-  npm start -- auth logout                  Delete the connector's local session
-  npm start -- models [--discover]           List configured or live models
-  npm start -- usage                        Show subscription usage JSON
-  npm start -- chat "Your prompt" [options] Stream one response
-  npm run web                              Open the local chat web app
+  npm start -- auth login [--provider claude|openai]     Browser OAuth login
+  npm start -- auth import [--file PATH]                 Link an existing Claude Code session
+  npm start -- auth status [--provider claude|openai]    Show expiry and source, never tokens
+  npm start -- auth logout [--provider claude|openai]    Delete the connector's local session
+  npm start -- models [--provider claude|openai] [--discover] List configured or live models
+  npm start -- usage [--provider claude|openai]          Show subscription usage JSON
+  npm start -- chat "Your prompt" [options]              Stream one response
+  npm run web [-- --port N] [-- --cwd PATH]              Open the local chat web app
 
 Options:
-  --model ID       Model ID (default: ${DEFAULT_MODELS[0].id})
-  --api-key        Use ANTHROPIC_API_KEY instead of a subscription
+  --provider NAME  Provider: claude or openai (default: claude)
+  --model ID       Model ID (default: ${DEFAULT_MODELS[0].id} for Claude, gpt-4o for OpenAI)
+  --cwd PATH       Working directory for agent workspace (default: current directory)
+  --api-key        Use ANTHROPIC_API_KEY instead of a subscription (Claude only)
   --auth-file PATH Alternate private token file
   --config PATH    Connector options JSON (models, timeouts, headers)
   --system TEXT    System instructions
@@ -47,11 +53,11 @@ async function main() {
       file: { type: 'string' }, 'auth-file': { type: 'string' },
       config: { type: 'string' }, model: { type: 'string' }, system: { type: 'string' },
       'max-tokens': { type: 'string' }, effort: { type: 'string' },
-      port: { type: 'string' },
+      port: { type: 'string' }, provider: { type: 'string' }, cwd: { type: 'string' },
     },
   })
   if (values.help || !positionals.length) { console.log(help); return }
-  let config: ConnectorOptions = {}
+  let config: ConnectorOptions & { openai?: OpenAIOptions } = {}
   if (values.config) {
     try { config = JSON.parse(await readFile(values.config, 'utf8')) }
     catch { throw new Error('Cannot read connector config JSON.') }
@@ -60,12 +66,18 @@ async function main() {
   if (values['auth-file']) config.authFile = values['auth-file']
   if (values['api-key']) config.authMode = 'api-key'
   if (values.discover) config.discovery = true
-  const store = new TokenStore(config.authFile)
+
+  const provider = values.provider?.toLowerCase() === 'openai' ? 'openai' : 'claude'
+  const store = provider === 'openai'
+    ? openaiStore(config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined))
+    : new TokenStore(config.authFile)
+
   const [command, ...args] = positionals
   if (command === 'web') {
     const { startWebServer } = await import('./web-server.js')
-    const { server, url } = await startWebServer({ config, port: values.port ? Number(values.port) : 4317 })
-    console.log(`Frontier web app: ${url}`)
+    const cwd = values.cwd ? resolve(values.cwd) : undefined
+    const { server, url } = await startWebServer({ config, port: values.port ? Number(values.port) : 4317, cwd })
+    console.log(`Frontier web app: ${url}${cwd ? ` (workspace: ${cwd})` : ''}`)
     console.log('Uses your existing connector session. Press Ctrl+C to stop.')
     const stop = () => { server.close(); server.closeAllConnections() }
     process.once('SIGINT', stop)
@@ -74,8 +86,8 @@ async function main() {
   }
   if (command === 'auth') {
     if (args[0] === 'login') {
-      const attempt = await beginLogin()
-      console.log(`Open this URL in your browser:\n${attempt.url}\n\nWaiting for login. You can also paste the full callback URL here.`)
+      const attempt = provider === 'openai' ? await beginOpenAILogin() : await beginLogin()
+      console.log(`Open this URL in your browser:\n${attempt.url}\n\nWaiting for ${provider} login. You can also paste the full callback URL here.`)
       const input = createInterface({ input: process.stdin, output: process.stdout, terminal: false })
       input.on('line', line => {
         if (line.trim() && !attempt.submitCallback(line.trim())) console.error('Invalid callback URL or state; login is still waiting.')
@@ -83,24 +95,27 @@ async function main() {
       const cancel = () => attempt.cancel()
       process.once('SIGINT', cancel)
       process.once('SIGTERM', cancel)
-      try { await store.save(await attempt.result); console.log('Claude login saved.') }
+      try { await store.save(await attempt.result); console.log(`${provider === 'openai' ? 'OpenAI' : 'Claude'} login saved.`) }
       finally { input.close(); process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     } else if (args[0] === 'import') {
+      if (provider === 'openai') throw new Error('Session import is only supported for Claude Code.')
       await store.save(await importClaudeCode(values.file))
       console.log('Claude Code session linked. Use auth status to see expiry and source.')
     } else if (args[0] === 'logout') {
-      await store.clear(); console.log('Connector session removed. Claude Code credentials were preserved.')
+      await store.clear(); console.log(`${provider === 'openai' ? 'OpenAI' : 'Claude'} session removed.`)
     } else if (args[0] === 'status') {
       const s = await store.read()
       console.log(JSON.stringify(s ? {
-        authenticated: true, expired: s.expiresAt <= Date.now(), expiresAt: new Date(s.expiresAt).toISOString(),
+        provider, authenticated: true, expired: s.expiresAt <= Date.now(), expiresAt: new Date(s.expiresAt).toISOString(),
         source: s.source?.kind ?? 'oauth', authFile: store.path,
-      } : { authenticated: false, authFile: store.path }, null, 2))
+      } : { provider, authenticated: false, authFile: store.path }, null, 2))
     } else throw new Error('Use auth login, import, status, or logout.')
     return
   }
-  const adapter = new ClaudeAdapter(config)
-  if (command === 'models') { console.log(JSON.stringify(await adapter.listModels('claude'), null, 2)); return }
+  const adapter = provider === 'openai'
+    ? new OpenAIAdapter({ authFile: store.path, ...config.openai })
+    : new ClaudeAdapter(config)
+  if (command === 'models') { console.log(JSON.stringify(await adapter.listModels(provider), null, 2)); return }
   if (command === 'usage') { console.log(JSON.stringify(await adapter.usage(), null, 2)); return }
   if (command !== 'chat') throw new Error(`Unknown command: ${command}. Use --help.`)
   const prompt = args.join(' ')
@@ -110,8 +125,9 @@ async function main() {
   process.once('SIGINT', cancel)
   process.once('SIGTERM', cancel)
   try {
+    const defaultModel = provider === 'openai' ? 'gpt-4o' : (config.models?.[0]?.id ?? DEFAULT_MODELS[0].id)
     for await (const chunk of adapter.stream({
-      provider: 'claude', model: values.model ?? config.models?.[0]?.id ?? DEFAULT_MODELS[0].id,
+      provider, model: values.model ?? defaultModel,
       messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })],
       system: values.system, signal: abort.signal,
       ...(values['max-tokens'] ? { maxTokens: Number(values['max-tokens']) } : {}),

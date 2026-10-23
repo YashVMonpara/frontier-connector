@@ -27,11 +27,21 @@
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9S4 17 4 12V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V3m5 5-5-5-5 5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2 6a2 2 0 0 1 2-2h4l2 2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Z"/></symbol>
   </svg>
   <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="Close navigation" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
     <a class="brand" href="/" aria-label="Frontier home"><img src="/favicon.svg" alt="" width="33" height="33"><span>frontier<span class="brand-period">.</span></span></a>
-    <button id="new-chat" class="new-chat"><svg><use href="#i-plus"/></svg><span>New conversation</span><kbd>⌘ K</kbd></button>
+    <div class="sidebar-actions">
+      <button id="new-chat" class="new-chat"><svg><use href="#i-plus"/></svg><span>New conversation</span><kbd>⌘ K</kbd></button>
+      <div class="sidebar-tool-row">
+        <button id="import-chat-button" class="sidebar-tool-button" type="button" title="Import conversation JSON"><svg><use href="#i-upload"/></svg><span>Import</span></button>
+        <button id="export-chat-button" class="sidebar-tool-button" type="button" title="Export conversation"><svg><use href="#i-download"/></svg><span>Export</span></button>
+        <input type="file" id="import-file-input" accept=".json" hidden>
+      </div>
+    </div>
     <div class="history-label">YOUR CONVERSATIONS</div>
     <nav id="history" class="history" aria-label="Saved conversations"><p class="history-empty">A little room for your next big idea.</p></nav>
     <div class="sidebar-footer">
@@ -42,7 +52,11 @@
   <main class="workspace">
     <header class="topbar">
       <div class="topbar-left"><button id="menu-button" class="icon-button mobile-only" aria-label="Open navigation" aria-expanded="false"><svg><use href="#i-menu"/></svg></button><span class="workspace-label">WORKSPACE</span><span class="topbar-divider">/</span><span id="chat-title" class="chat-title">New conversation</span></div>
-      <div class="topbar-right"><span id="connection-status" class="connection-status"><span class="status-dot"></span><span>Connecting</span></span><button id="settings-button" class="icon-button" aria-label="Conversation settings" title="Conversation settings"><svg><use href="#i-sliders"/></svg></button></div>
+      <div class="topbar-right">
+        <span id="workspace-indicator" class="workspace-indicator" title="Current workspace directory"><svg><use href="#i-folder"/></svg><span id="workspace-path">Loading workspace…</span></span>
+        <span id="connection-status" class="connection-status"><span class="status-dot"></span><span>Connecting</span></span>
+        <button id="settings-button" class="icon-button" aria-label="Conversation settings" title="Conversation settings"><svg><use href="#i-sliders"/></svg></button>
+      </div>
     </header>
     <div id="scroll-area" class="scroll-area">
       <section id="welcome" class="welcome">
@@ -82,6 +96,8 @@
     <div class="runtime-card"><span class="runtime-dot"></span><div><strong>DeepSeek Harness agent runtime</strong><p id="runtime-detail">Starting the complete agent runtime…</p></div></div>
     <p class="logout-note">Log out disconnects this app only. Your chats and other apps stay signed in.</p>
     <div id="login-help" hidden></div>
+    <label class="field-label" for="workspace-input">Workspace directory<span>Folder where the agent creates and modifies files.</span></label>
+    <div class="workspace-row"><input id="workspace-input" placeholder="/path/to/project" autocomplete="off"><button id="save-workspace-button" class="secondary-button" type="button">Switch</button></div>
     <label class="field-label" for="instructions">Custom instructions<span>How would you like the selected agent to respond?</span></label>
     <textarea id="instructions" rows="4" maxlength="20000" placeholder="For example: Be concise. Explain your assumptions."></textarea>
     <div class="settings-grid"><div><label class="field-label" for="max-tokens">Response length</label><select id="max-tokens"><option value="2048">Short · 2k</option><option value="4096" selected>Standard · 4k</option><option value="8192">Long · 8k</option><option value="16384">Extended · 16k</option></select></div><div><label class="field-label" for="effort">Reasoning effort</label><select id="effort"><option value="">Model default</option></select></div></div>
@@ -90,6 +106,7 @@
     <div class="dialog-footer"><span>Applies to your next message.</span><button id="save-settings" class="primary-button">Save settings</button></div>
   </dialog>
   <dialog id="delete-dialog" class="delete-dialog"><h2>Delete this conversation?</h2><p>This removes the conversation from this browser.</p><div class="delete-actions"><button id="cancel-delete" class="secondary-button">Keep conversation</button><button id="confirm-delete" class="danger-button">Delete</button></div></dialog>
+  <dialog id="export-dialog" class="export-dialog"><h2>Export conversation</h2><p>Choose an export format for this conversation.</p><div class="export-actions"><button id="export-md-button" class="primary-button" type="button">Export as Markdown (.md)</button><button id="export-json-button" class="secondary-button" type="button">Export as JSON (.json)</button><button id="close-export-dialog" class="text-button" type="button">Cancel</button></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

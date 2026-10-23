@@ -27,8 +27,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   const openaiRoute = config.openaiRoute ?? 'openai'
   if (route === openaiRoute) throw new Error('Claude and OpenAI require different DSH routes.')
   const claude = new ClaudeAdapter({ ...config, resolveAttachments: () => ctx.attachments })
-  const openai = new OpenAIAdapter({ ...config.openai,
-    authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined) })
+  const openai = new OpenAIAdapter({
+    ...config.openai,
+    authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined),
+    resolveAttachments: () => ctx.attachments,
+  })
   ctx.effect(() => ctx.llm.registerAdapter([route], claude), 'frontier: Claude adapter')
   ctx.effect(() => ctx.llm.registerAdapter([openaiRoute], openai), 'frontier: OpenAI adapter')
 }

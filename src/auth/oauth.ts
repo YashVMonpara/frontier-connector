@@ -8,6 +8,18 @@ export const SCOPE = 'org:create_api_key user:profile user:inference user:sessio
 export const TOKEN_URL = 'https://claude.ai/v1/oauth/token'
 export type Fetch = typeof globalThis.fetch
 
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+function originsEquivalent(actual: URL, expected: URL): boolean {
+  if (actual.origin === expected.origin) return true
+  return actual.protocol === expected.protocol &&
+    actual.port === expected.port &&
+    isLoopbackHost(actual.hostname) &&
+    isLoopbackHost(expected.hostname)
+}
+
 export function pkce() {
   const verifier = randomBytes(32).toString('base64url')
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') }
@@ -88,7 +100,7 @@ export async function beginOAuthLogin(spec: OAuthSpec, options: { timeoutMs?: nu
     let url: URL
     try { url = new URL(raw) } catch { return false }
     const expected = new URL(redirectUri)
-    if (url.origin !== expected.origin || url.pathname !== expected.pathname ||
+    if (!originsEquivalent(url, expected) || url.pathname !== expected.pathname ||
         url.searchParams.get('state') !== state) return false
     if (url.searchParams.has('error')) { fail(new Error(`${spec.name} login was declined.`)); return true }
     const code = url.searchParams.get('code')
@@ -99,7 +111,15 @@ export async function beginOAuthLogin(spec: OAuthSpec, options: { timeoutMs?: nu
     return true
   }
   const server = createServer((req, res) => {
-    if (req.method !== 'GET' || req.headers.host !== new URL(redirectUri).host) {
+    const expected = new URL(redirectUri)
+    const host = req.headers.host
+    const validHost = host === expected.host ||
+      (Boolean(host && expected.port) && (
+        host === `127.0.0.1:${expected.port}` ||
+        host === `localhost:${expected.port}` ||
+        host === `[::1]:${expected.port}`
+      ))
+    if (req.method !== 'GET' || !validHost) {
       res.writeHead(400).end('Invalid callback.'); return
     }
     const accepted = submitCallback(new URL(req.url ?? '/', redirectUri).href)

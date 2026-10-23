@@ -120,3 +120,21 @@ test('web chat runs through the complete agent runtime when enabled', async t =>
   assert.match(calls[0].prompt, /Earlier conversation imported/)
   assert.match(calls[0].prompt, /Current user request:\nDo the task/)
 })
+
+test('web status exposes workspace cwd and post /api/workspace switches it', async t => {
+  const { url, status } = await web(t)
+  assert.ok(status.workspace?.cwd)
+  const postWs = (body, token = status.csrf) => fetch(`${url}/api/workspace`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': token }, body: JSON.stringify(body),
+  })
+  // Invalid path
+  const badRes = await postWs({ cwd: '/nonexistent_frontier_path_xyz_123' })
+  assert.equal(badRes.status, 400)
+
+  // Valid path (tmpdir)
+  const { tmpdir } = await import('node:os')
+  const validRes = await postWs({ cwd: tmpdir() })
+  assert.equal(validRes.status, 200)
+  const data = await validRes.json()
+  assert.equal(data.ok, true)
+})
