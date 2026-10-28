@@ -520,6 +520,10 @@ export async function* streamResponses(
 ): AsyncGenerator<StreamChunk> {
   const translator = new ResponsesStreamTranslator(onReasoningCaptured)
   for await (const sseEvent of parseSse(stream, onActivity)) {
+    if (sseEvent.data.trim() === '[DONE]') {
+      if (translator.terminated) return
+      continue
+    }
     let event: ResponsesStreamEvent
     try {
       event = JSON.parse(sseEvent.data) as ResponsesStreamEvent

@@ -138,3 +138,13 @@ test('web status exposes workspace cwd and post /api/workspace switches it', asy
   const data = await validRes.json()
   assert.equal(data.ok, true)
 })
+
+test('web app markdown pattern matches bold and italic words containing n', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const appJs = await readFile('web/app.js', 'utf8')
+  assert.ok(!appJs.includes("[^*\\\\n]+"), 'app.js must not contain double backslash n in character classes')
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g
+  assert.ok('**conversation**'.match(pattern), 'bold word with n must match')
+  assert.ok('**new**'.match(pattern), 'bold new must match')
+  assert.ok('*function*'.match(pattern), 'italic function must match')
+})

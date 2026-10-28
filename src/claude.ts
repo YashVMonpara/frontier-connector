@@ -231,7 +231,7 @@ export class ClaudeAdapter extends LlmAdapter {
       await response.body.cancel()
       throw new LlmError('Expected a Claude SSE response.', 'MALFORMED_RESPONSE')
     }
-    const watchdog = idleWatchdog(options.signal, this.config.streamIdleTimeoutMs ?? 60_000)
+    const watchdog = idleWatchdog(options.signal, this.config.streamIdleTimeoutMs ?? 60_000, 'Claude stream')
     // Cancel the body even for injected fetch implementations that ignore AbortSignal.
     const reader = response.body.getReader()
     let abortReason: unknown

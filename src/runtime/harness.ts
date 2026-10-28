@@ -45,15 +45,19 @@ export const HARNESS_VERSION = '0.1.5-rc.2'
 
 function ensureSpawnHelper(): void {
   if (process.platform === 'win32') return
-  const require = createRequire(import.meta.url)
-  const subprocessPackage = require.resolve('@deepseek-ai/dsh-subprocess-local/package.json')
-  const fromSubprocess = createRequire(subprocessPackage)
-  const nodePtyRoot = dirname(dirname(fromSubprocess.resolve('node-pty')))
-  for (const helper of [
-    join(nodePtyRoot, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'),
-    join(nodePtyRoot, 'build', 'Release', 'spawn-helper'),
-  ]) {
-    if (existsSync(helper) && (statSync(helper).mode & 0o111) === 0) chmodSync(helper, 0o755)
+  try {
+    const require = createRequire(import.meta.url)
+    const subprocessPackage = require.resolve('@deepseek-ai/dsh-subprocess-local/package.json')
+    const fromSubprocess = createRequire(subprocessPackage)
+    const nodePtyRoot = dirname(dirname(fromSubprocess.resolve('node-pty')))
+    for (const helper of [
+      join(nodePtyRoot, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'),
+      join(nodePtyRoot, 'build', 'Release', 'spawn-helper'),
+    ]) {
+      if (existsSync(helper) && (statSync(helper).mode & 0o111) === 0) chmodSync(helper, 0o755)
+    }
+  } catch {
+    // Defensive: resolution or permission quirks in custom environments do not block harness instantiation.
   }
 }
 

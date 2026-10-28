@@ -206,3 +206,15 @@ test('OpenAI captures and replays reasoning across tool calls', async t => {
   assert.ok(reasoningItem, 'reasoning item must be replayed in turn 2')
   assert.equal(reasoningItem.encrypted_content, 'ENCRYPTED_SECRET_THINKING')
 })
+
+test('streamResponses gracefully handles trailing [DONE] event without failing', async () => {
+  const events = [
+    { type: 'response.output_text.delta', item_id: 'message', content_index: 0, delta: 'Hello' },
+    { type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+  ]
+  const raw = bytes(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('') + 'data: [DONE]\n\n')
+  const { streamResponses } = await import('../dist/translate/responses.js')
+  const chunks = await collect(streamResponses(raw))
+  assert.equal(chunks.find(c => c.type === 'text-delta').text, 'Hello')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
