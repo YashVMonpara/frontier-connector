@@ -27,13 +27,13 @@ export function retryDelay(headers: Headers, now = Date.now()): number | undefin
 
 export const sleep = (ms: number, signal?: AbortSignal) => delay(ms, undefined, { signal })
 
-export function idleWatchdog(parent: AbortSignal | undefined, timeoutMs: number) {
+export function idleWatchdog(parent: AbortSignal | undefined, timeoutMs: number, label = 'Stream') {
   const controller = new AbortController()
   const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal
   let timer: NodeJS.Timeout
   const touch = () => {
     clearTimeout(timer)
-    timer = setTimeout(() => controller.abort(new LlmError('Claude stream idle timeout.', 'TIMEOUT')), timeoutMs)
+    timer = setTimeout(() => controller.abort(new LlmError(`${label} idle timeout.`, 'TIMEOUT')), timeoutMs)
   }
   touch()
   return { signal, touch, close: () => { clearTimeout(timer); controller.abort() } }

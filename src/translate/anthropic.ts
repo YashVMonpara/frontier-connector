@@ -551,6 +551,10 @@ export async function* streamAnthropic(
 ): AsyncGenerator<StreamChunk> {
   const translator = new AnthropicStreamTranslator()
   for await (const sseEvent of parseSse(stream, onActivity)) {
+    if (sseEvent.data.trim() === '[DONE]') {
+      if (translator.terminated) return
+      continue
+    }
     let event: AnthropicStreamEvent
     try {
       event = JSON.parse(sseEvent.data) as AnthropicStreamEvent

@@ -36,7 +36,7 @@ function toast(message) { $('toast').textContent = message; $('toast').hidden = 
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('Copied to clipboard') } catch { toast('Clipboard unavailable. Select the text to copy it.') } }
 function inline(parent, text) {
   // Build nodes rather than inserting HTML: model output is always untrusted.
-  const pattern = /(`[^`\n]+`|\*\*[^*\\n]+\*\*|\*[^*\\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g
   let last = 0
   for (const match of text.matchAll(pattern)) {
     parent.append(document.createTextNode(text.slice(last, match.index)))
@@ -203,6 +203,9 @@ function updateControls() {
   $('send-button').disabled = busy || !connection.connected || !$('prompt').value.trim() || !$('model').value
   $('send-button').hidden = busy; $('stop-button').hidden = !busy; $('model').disabled = busy || !connection.connected
   $('new-chat').disabled = busy; $('provider').disabled = busy
+  if ($('import-chat-button')) $('import-chat-button').disabled = busy
+  if ($('export-chat-button')) $('export-chat-button').disabled = busy
+  if ($('save-workspace-button')) $('save-workspace-button').disabled = busy
   $('response-status').textContent = busy ? `${providerName(current().settings.provider)} agent is working…` : 'Conversations stay in this browser.'
 }
 function selectConnection() {
@@ -290,6 +293,7 @@ async function logout(provider) {
   } catch (error) { toast(error.message); $(`logout-${provider}`).disabled = false }
 }
 async function saveWorkspace() {
+  if (busy) { toast('Please wait for the current response to finish before switching workspace.'); return }
   const target = $('workspace-input').value.trim()
   if (!target) return
   $('save-workspace-button').disabled = true
@@ -303,8 +307,7 @@ async function saveWorkspace() {
     if (!res.ok) throw new Error(data.error || 'Failed to switch workspace')
     currentWorkspace = data.cwd
     updateWorkspaceUI()
-    const chat = current()
-    delete chat.agent
+    for (const c of conversations) delete c.agent
     persist()
     toast(`Workspace switched: ${currentWorkspace}`)
   } catch (err) {
@@ -324,10 +327,14 @@ function downloadFile(filename, content, mimeType) {
   a.remove()
   URL.revokeObjectURL(url)
 }
+function safeFilename(title, ext) {
+  const cleaned = title.trim().replace(/[/\\?%*:|"<>]/g, '_').slice(0, 50) || 'conversation'
+  return `${cleaned}.${ext}`
+}
 function exportConversationAsJson() {
   const chat = current()
   const data = JSON.stringify(chat, null, 2)
-  downloadFile(`${chat.title.slice(0, 30).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`, data, 'application/json')
+  downloadFile(safeFilename(chat.title, 'json'), data, 'application/json')
   $('export-dialog').close()
   toast('Exported JSON')
 }
@@ -347,11 +354,12 @@ function exportConversationAsMarkdown() {
       md += `> **Reasoning:** ${m.reasoning}\n\n`
     }
   }
-  downloadFile(`${chat.title.slice(0, 30).replace(/[^a-zA-Z0-9_-]/g, '_')}.md`, md, 'text/markdown')
+  downloadFile(safeFilename(chat.title, 'md'), md, 'text/markdown')
   $('export-dialog').close()
   toast('Exported Markdown')
 }
 function importConversationJson(event) {
+  if (busy) { toast('Please wait for the current response to finish.'); event.target.value = ''; return }
   const file = event.target.files?.[0]
   if (!file) return
   const reader = new FileReader()
@@ -361,11 +369,24 @@ function importConversationJson(event) {
       if (!data || typeof data !== 'object' || !Array.isArray(data.messages)) {
         throw new Error('Invalid conversation JSON file.')
       }
+      const rawMessages = data.messages
+        .filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.text === 'string' && m.text.trim())
+        .map(m => ({
+          id: typeof m.id === 'string' && m.id ? m.id : uid(),
+          role: m.role,
+          text: m.text,
+          status: 'complete',
+          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+          ...(m.provider ? { provider: m.provider } : {}),
+          ...(m.model ? { model: m.model } : {}),
+        }))
+      while (rawMessages.length > 0 && rawMessages[0].role !== 'user') rawMessages.shift()
+      const provider = data.settings?.provider === 'openai' ? 'openai' : 'claude'
       const imported = {
         ...newConversation(),
-        title: typeof data.title === 'string' ? data.title : 'Imported conversation',
-        settings: { ...defaults, ...(data.settings || {}) },
-        messages: data.messages.filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.text === 'string').map(m => ({ ...m, status: 'complete' })),
+        title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : 'Imported conversation',
+        settings: { ...defaults, ...(data.settings || {}), provider },
+        messages: rawMessages,
         updatedAt: Date.now(),
       }
       conversations.unshift(imported)

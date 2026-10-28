@@ -78,7 +78,7 @@ export class OpenAIAdapter extends LlmAdapter {
       ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort, summary: 'auto' } } : {}),
     }
     // Codex subscription requests do not accept max_output_tokens.
-    const watchdog = idleWatchdog(options.signal, this.config.streamIdleTimeoutMs ?? 60_000)
+    const watchdog = idleWatchdog(options.signal, this.config.streamIdleTimeoutMs ?? 60_000, 'OpenAI stream')
     try {
       const response = await this.request('/backend-api/codex/responses', { method: 'POST', body: JSON.stringify(body) }, watchdog.signal)
       // The subscription gateway can omit or mislabel the SSE content type.

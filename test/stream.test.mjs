@@ -103,3 +103,11 @@ test('thinking effort and token budgets are validated before requests', () => {
   assert.equal(body.thinking.type, 'adaptive')
   assert.equal(body.output_config.effort, 'high')
 })
+
+test('streamAnthropic gracefully handles trailing [DONE] event without failing', async () => {
+  const events = textEvents()
+  const payload = bytes(events.map(e => `event: ${e.type}\r\ndata: ${JSON.stringify(e)}\r\n\r\n`).join('') + 'data: [DONE]\r\n\r\n')
+  const chunks = await collect(streamAnthropic(payload))
+  assert.equal(chunks.find(c => c.type === 'text-delta').text, 'Hello 🌍')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
