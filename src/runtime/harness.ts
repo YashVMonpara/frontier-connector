@@ -28,6 +28,8 @@ export interface AgentRuntime {
   run(input: AgentRunInput): Promise<AgentRunResult>
   disconnect?(provider: AgentRunInput['provider']): Promise<void>
   close(): Promise<void>
+  getCwd?(): string
+  setCwd?(cwd: string): Promise<void>
 }
 
 interface RuntimeEntry {
@@ -63,12 +65,22 @@ function ensureSpawnHelper(): void {
 export class HarnessAgentRuntime implements AgentRuntime {
   private readonly entries = new Map<string, RuntimeEntry>()
   private readonly home: string
-  private readonly cwd: string
+  private cwd: string
 
   constructor(options: { home?: string; cwd?: string } = {}) {
     ensureSpawnHelper()
     this.home = options.home ?? join(dirname(defaultAuthPath()), 'harness')
     this.cwd = options.cwd ?? process.cwd()
+  }
+
+  getCwd(): string {
+    return this.cwd
+  }
+
+  async setCwd(newCwd: string): Promise<void> {
+    if (this.cwd === newCwd) return
+    this.cwd = newCwd
+    await this.close()
   }
 
   private async entry(input: AgentRunInput): Promise<RuntimeEntry> {

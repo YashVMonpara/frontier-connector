@@ -1,20 +1,36 @@
 import { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { OpenAITokens, openaiStore } from './auth/openai.js'
 import type { Fetch } from './auth/oauth.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from './translate/responses.js'
+import type { ReasoningReplayItem } from './translate/responses.js'
+import { resolveImages } from './translate/resolved.js'
 import { idleWatchdog } from './transport.js'
 
-export interface OpenAIOptions { authFile?: string; fetchFn?: Fetch; streamIdleTimeoutMs?: number; clientVersion?: string }
+export interface OpenAIOptions {
+  authFile?: string
+  fetchFn?: Fetch
+  streamIdleTimeoutMs?: number
+  clientVersion?: string
+  resolveAttachments?: () => AttachmentStore | undefined
+}
+
 export class OpenAIAdapter extends LlmAdapter {
   readonly tokens: OpenAITokens
   private readonly fetchFn: Fetch
   private catalog?: { expires: number; models: LlmResolvedModelInfo[] }
+  private readonly reasoningCache = new Map<string, readonly ReasoningReplayItem[]>()
+
   constructor(private readonly config: OpenAIOptions = {}) {
-    super(); this.fetchFn = config.fetchFn ?? fetch; this.tokens = new OpenAITokens(openaiStore(config.authFile), this.fetchFn)
+    super()
+    this.fetchFn = config.fetchFn ?? fetch
+    this.tokens = new OpenAITokens(openaiStore(config.authFile), this.fetchFn)
   }
+
   override providerInfo(provider: string) { return { id: provider, name: 'OpenAI (ChatGPT)' } }
   invalidate() { this.catalog = undefined }
+
   private async request(path: string, init: RequestInit, signal: AbortSignal) {
     for (let attempt = 0, rejected: string | undefined; ; attempt++) {
       signal.throwIfAborted()
@@ -31,6 +47,7 @@ export class OpenAIAdapter extends LlmAdapter {
       return response
     }
   }
+
   override async listModels(provider: string): Promise<LlmResolvedModelInfo[]> {
     if (!await this.tokens.store.read()) return []
     if (this.catalog && this.catalog.expires > Date.now()) return this.catalog.models.map(m => ({ ...m, provider }))
@@ -43,13 +60,19 @@ export class OpenAIAdapter extends LlmAdapter {
     }))
     this.catalog = { models, expires: Date.now() + 300_000 }; return models
   }
+
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return this.catalog?.models.find(m => m.id === model) ?? { provider, id: model, name: model }
   }
+
   async usage() { return (await this.request('/backend-api/wham/usage', { method: 'GET' }, AbortSignal.timeout(30_000))).json() }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const resolved = toResponsesInput(options.messages, options.system)
-    const body = { model: options.model, instructions: resolved.instructions || 'You are a helpful assistant.', input: resolved.input,
+    options.signal?.throwIfAborted()
+    const messages = await resolveImages(options.messages, this.config.resolveAttachments?.(), options.signal)
+    const resolved = toResponsesInput(messages, options.system, callId => this.reasoningCache.get(callId))
+    const body = {
+      model: options.model, instructions: resolved.instructions || 'You are a helpful assistant.', input: resolved.input,
       stream: true, store: false, include: ['reasoning.encrypted_content'],
       ...(options.tools?.length ? { tools: toResponsesTools(options.tools, { strict: false }), parallel_tool_calls: true } : {}),
       ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort, summary: 'auto' } } : {}),
@@ -61,7 +84,9 @@ export class OpenAIAdapter extends LlmAdapter {
       // The subscription gateway can omit or mislabel the SSE content type.
       // Validate the actual events (including response.completed) in the parser.
       if (!response.body) throw new Error('OpenAI returned an empty response body.')
-      yield* streamResponses(response.body, watchdog.touch)
+      yield* streamResponses(response.body, watchdog.touch, undefined, (callId, items) => {
+        this.reasoningCache.set(callId, items)
+      })
     } finally { watchdog.close() }
   }
 }

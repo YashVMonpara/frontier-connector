@@ -305,6 +305,12 @@ export class ResponsesStreamTranslator {
   private sawToolCall = false
   /** Set once `response.completed` produced the terminal finish chunk. */
   terminated = false
+  private currentReasoning: ReasoningReplayItem[] = []
+  readonly callReasoning = new Map<string, readonly ReasoningReplayItem[]>()
+
+  constructor(
+    private readonly onReasoningCaptured?: (callId: string, items: readonly ReasoningReplayItem[]) => void,
+  ) {}
 
   private open(key: string, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string): OpenBlock {
     const block: OpenBlock = {
@@ -371,6 +377,10 @@ export class ResponsesStreamTranslator {
         if (item?.type === 'function_call' && item.id !== undefined) {
           this.sawToolCall = true
           const callId = item.call_id ?? ''
+          if (callId && this.currentReasoning.length > 0) {
+            this.callReasoning.set(callId, this.currentReasoning)
+            this.onReasoningCaptured?.(callId, this.currentReasoning)
+          }
           const block = this.open(`${item.id}:call`, 'tool-call', chunks, callId, item.name)
           chunks.push({
             type: 'tool-call-delta',
@@ -419,8 +429,22 @@ export class ResponsesStreamTranslator {
       case 'response.output_item.done': {
         const item = event.item
         if (item === undefined || item.id === undefined) return chunks
-        if (item.type === 'function_call') {
+        if (item.type === 'reasoning' && typeof item.encrypted_content === 'string') {
+          const reasoningItem: ReasoningReplayItem = {
+            type: 'reasoning',
+            ...item.id === undefined ? {} : { id: item.id },
+            ...item.summary === undefined ? {} : { summary: item.summary },
+            ...item.status === undefined ? {} : { status: item.status },
+            encrypted_content: item.encrypted_content,
+          }
+          this.currentReasoning = [...this.currentReasoning, reasoningItem]
+        } else if (item.type === 'function_call') {
           const key = `${item.id}:call`
+          const callId = item.call_id ?? ''
+          if (callId && this.currentReasoning.length > 0 && !this.callReasoning.has(callId)) {
+            this.callReasoning.set(callId, this.currentReasoning)
+            this.onReasoningCaptured?.(callId, this.currentReasoning)
+          }
           // The provider may deliver the complete arguments only on done.
           const block = this.blocks.get(key)
           if (block !== undefined && block.text.length === 0 && item.arguments !== undefined) {
@@ -485,14 +509,16 @@ export class ResponsesStreamTranslator {
  * @param transform - optional per-event rewrite applied before translation
  *   (Copilot's gateway mints a fresh item id per event; the adapter rewrites
  *   them into stable per-item keys).
+ * @param onReasoningCaptured - optional callback for captured reasoning items correlated with a call id.
  * @returns the chunk stream; throws when the stream ends before `response.completed`.
  */
 export async function* streamResponses(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
   transform?: (event: ResponsesStreamEvent) => ResponsesStreamEvent,
+  onReasoningCaptured?: (callId: string, items: readonly ReasoningReplayItem[]) => void,
 ): AsyncGenerator<StreamChunk> {
-  const translator = new ResponsesStreamTranslator()
+  const translator = new ResponsesStreamTranslator(onReasoningCaptured)
   for await (const sseEvent of parseSse(stream, onActivity)) {
     let event: ResponsesStreamEvent
     try {

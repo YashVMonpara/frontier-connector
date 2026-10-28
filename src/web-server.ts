@@ -4,7 +4,9 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { statSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createAssistantMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
@@ -24,6 +26,7 @@ interface LoginJob { state: 'starting' | 'waiting' | 'connected' | 'error'; atte
 
 interface WebOptions {
   port?: number
+  cwd?: string
   config?: ConnectorOptions & { openai?: OpenAIOptions }
   adapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
   openaiAdapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
@@ -69,10 +72,10 @@ export async function startWebServer(options: WebOptions = {}) {
   const config = options.config ?? {}
   const adapter = options.adapter ?? new ClaudeAdapter(config)
   const store = new TokenStore(config.authFile)
-  const openaiConfig = { ...config.openai, authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined) }
+  const openaiConfig = { ...config.openai, authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined), resolveAttachments: config.resolveAttachments }
   const openai = options.openaiAdapter ?? new OpenAIAdapter(openaiConfig)
   const adapters = { claude: adapter, openai }
-  const agentRuntime = options.agentRuntime === false ? undefined : options.agentRuntime ?? new HarnessAgentRuntime()
+  const agentRuntime = options.agentRuntime === false ? undefined : options.agentRuntime ?? new HarnessAgentRuntime({ cwd: options.cwd })
   const stores = { claude: store, openai: openaiStore(openaiConfig.authFile) }
   if (stores.claude.path === stores.openai.path) throw new Error('Claude and OpenAI require separate credential files.')
   const logins = new Map<Provider, LoginJob>()
@@ -134,16 +137,34 @@ export async function startWebServer(options: WebOptions = {}) {
               login: login ? { state: login.state, error: login.error } : null }
           } catch (error) { providers[provider] = { connected: false, mode: modeOf(provider), models: [], error: error instanceof Error ? error.message : 'Connection unavailable.' } }
         }
-        json(res, { csrf, ...providers.claude, providers, agentRuntime: {
-          enabled: Boolean(agentRuntime), profile: agentRuntime ? 'sdk' : null, version: agentRuntime ? HARNESS_VERSION : null,
-          capabilities: agentRuntime ? ['agent-loop', 'filesystem', 'shell', 'skills', 'goals', 'subagents', 'compaction'] : [],
-        } })
+        json(res, {
+          csrf, ...providers.claude, providers,
+          workspace: { cwd: agentRuntime?.getCwd?.() ?? options.cwd ?? process.cwd() },
+          agentRuntime: {
+            enabled: Boolean(agentRuntime), profile: agentRuntime ? 'sdk' : null, version: agentRuntime ? HARNESS_VERSION : null,
+            capabilities: agentRuntime ? ['agent-loop', 'filesystem', 'shell', 'skills', 'goals', 'subagents', 'compaction'] : [],
+          },
+        })
         return
       }
-      const routes = ['/api/chat', '/api/usage', '/api/auth/login', '/api/auth/logout', '/api/auth/cancel', '/api/auth/callback']
+      const routes = ['/api/chat', '/api/usage', '/api/auth/login', '/api/auth/logout', '/api/auth/cancel', '/api/auth/callback', '/api/workspace']
       if (req.method !== 'POST' || !routes.includes(path)) throw new RequestError('Not found.', 404)
       const token = req.headers['x-frontier-token']
       if (typeof token !== 'string' || Buffer.byteLength(token) !== Buffer.byteLength(csrf) || !timingSafeEqual(Buffer.from(token), Buffer.from(csrf))) throw new RequestError('Refresh this page to reconnect.', 403)
+      if (path === '/api/workspace') {
+        const body = await readJson(req) as { cwd?: unknown }
+        if (typeof body?.cwd !== 'string' || !body.cwd.trim()) throw new RequestError('Workspace path is required.')
+        const target = resolve(body.cwd.trim())
+        try {
+          const st = statSync(target)
+          if (!st.isDirectory()) throw new RequestError('Workspace path must be a directory.')
+        } catch (err) {
+          if (err instanceof RequestError) throw err
+          throw new RequestError('Workspace directory does not exist or is inaccessible.')
+        }
+        if (agentRuntime?.setCwd) await agentRuntime.setCwd(target)
+        json(res, { ok: true, cwd: target }); return
+      }
       if (path.startsWith('/api/auth/')) {
         const body = await readJson(req) as { provider?: unknown; callback?: unknown }
         const provider = providerOf(body?.provider), target = stores[provider]

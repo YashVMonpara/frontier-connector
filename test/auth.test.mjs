@@ -112,3 +112,15 @@ test('OAuth HTTP errors never echo response secrets', async t => {
   await assert.rejects(manager.session(), error => error.message.includes('HTTP 400') && !error.message.includes('fake-secret'))
   assert.equal((await store.read()).accessToken, 'fake-access-token')
 })
+
+test('OAuth submitCallback accepts 127.0.0.1 and localhost loopback interchangeably', async () => {
+  const attempt = await beginLogin({ fetchFn: async () => Response.json({ access_token: 'new', refresh_token: 'refresh', expires_in: 3600 }) })
+  const authorize = new URL(attempt.url)
+  const redirectUri = authorize.searchParams.get('redirect_uri')
+  const callback = new URL(redirectUri)
+  callback.searchParams.set('code', 'test-code')
+  callback.searchParams.set('state', authorize.searchParams.get('state'))
+  callback.hostname = callback.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
+  assert.equal(attempt.submitCallback(callback.href), true)
+  assert.equal((await attempt.result).accessToken, 'new')
+})

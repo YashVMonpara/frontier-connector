@@ -116,3 +116,93 @@ test('OpenAI sends Harness tools as non-strict Responses functions', async t => 
   assert.equal(chunks.find(chunk => chunk.type === 'block-end').block.type, 'tool-call')
   assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
 })
+
+test('OpenAI image input fails explicitly without an attachment resolver', async t => {
+  const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
+  await target.save(session({ accountId: 'account' }))
+  let fetched = false
+  const adapter = new OpenAIAdapter({ authFile: target.path, fetchFn: async () => { fetched = true; return Response.json({}) } })
+  const input = options({ provider: 'openai' })
+  input.messages[0] = { ...input.messages[0], content: [...input.messages[0].content, { type: 'image', attachment: { attachmentId: 'fake' } }] }
+  await assert.rejects(collect(adapter.stream(input)), /no attachments service/)
+  assert.equal(fetched, false)
+})
+
+test('OpenAI resolves attachment-backed images into the request', async t => {
+  const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
+  await target.save(session({ accountId: 'account' }))
+  let parsedInput
+  const events = [
+    { type: 'response.output_text.delta', item_id: 'message', content_index: 0, delta: 'OK' },
+    { type: 'response.completed', response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+  ]
+  const adapter = new OpenAIAdapter({
+    authFile: target.path,
+    resolveAttachments: () => ({ readImage: async () => ({ ref: { mediaType: 'image/png', attachmentId: 'a', bytes: 3, width: 1, height: 1 }, data: Uint8Array.of(1, 2, 3) }) }),
+    fetchFn: async (_, init) => {
+      parsedInput = JSON.parse(init.body).input
+      return new Response(bytes(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))
+    },
+  })
+  const input = options({ provider: 'openai' })
+  input.messages[0] = { ...input.messages[0], content: [...input.messages[0].content, { type: 'image', attachment: { attachmentId: 'a' } }] }
+  await collect(adapter.stream(input))
+  const userMsg = parsedInput.find(item => item.type === 'message' && item.role === 'user')
+  const imgBlock = userMsg.content.find(block => block.type === 'input_image')
+  assert.ok(imgBlock)
+  assert.equal(imgBlock.image_url, 'data:image/png;base64,AQID')
+})
+
+test('OpenAI captures and replays reasoning across tool calls', async t => {
+  const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
+  await target.save(session({ accountId: 'account' }))
+  const turn1Events = [
+    { type: 'response.output_item.added', item: { type: 'reasoning', id: 'reason-1' } },
+    { type: 'response.reasoning_text.delta', item_id: 'reason-1', delta: 'Thinking about tools...' },
+    { type: 'response.output_item.done', item: { type: 'reasoning', id: 'reason-1', encrypted_content: 'ENCRYPTED_SECRET_THINKING', status: 'completed' } },
+    { type: 'response.output_item.added', item: { type: 'function_call', id: 'call-item-1', call_id: 'call-123', name: 'calc' } },
+    { type: 'response.function_call_arguments.delta', item_id: 'call-item-1', delta: '{"expr":"2+2"}' },
+    { type: 'response.output_item.done', item: { type: 'function_call', id: 'call-item-1', call_id: 'call-123', name: 'calc', arguments: '{"expr":"2+2"}' } },
+    { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+  ]
+  let turn2Body
+  const adapter = new OpenAIAdapter({
+    authFile: target.path,
+    fetchFn: async (url, init) => {
+      if (init.method === 'POST') {
+        const body = JSON.parse(init.body)
+        if (!body.input.some(item => item.type === 'function_call_output')) {
+          return new Response(bytes(turn1Events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))
+        }
+        turn2Body = body
+        return new Response(bytes([
+          `data: ${JSON.stringify({ type: 'response.output_text.delta', item_id: 'msg-2', delta: 'Result is 4' })}\n\n`,
+          `data: ${JSON.stringify({ type: 'response.completed', response: { usage: { input_tokens: 15, output_tokens: 4 } } })}\n\n`,
+        ].join('')))
+      }
+    },
+  })
+  // Turn 1
+  const chunks1 = await collect(adapter.stream(options({
+    provider: 'openai',
+    tools: [{ name: 'calc', description: 'Calculator', parameters: { type: 'object' } }],
+  })))
+  assert.equal(chunks1.at(-1).reason.kind, 'tool-calls')
+
+  // Turn 2 with tool result
+  const input2 = options({
+    provider: 'openai',
+    tools: [{ name: 'calc', description: 'Calculator', parameters: { type: 'object' } }],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', id: 'call-123', name: 'calc', arguments: '{"expr":"2+2"}' }] },
+      { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call-123', content: [{ type: 'text', text: '4' }] }] },
+    ],
+  })
+  const chunks2 = await collect(adapter.stream(input2))
+  assert.equal(chunks2.at(-1).reason.kind, 'stop')
+  assert.ok(turn2Body)
+  const reasoningItem = turn2Body.input.find(item => item.type === 'reasoning')
+  assert.ok(reasoningItem, 'reasoning item must be replayed in turn 2')
+  assert.equal(reasoningItem.encrypted_content, 'ENCRYPTED_SECRET_THINKING')
+})

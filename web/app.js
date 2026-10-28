@@ -3,6 +3,7 @@ const STORE = 'frontier.workspace.v1'
 const defaults = { provider: 'claude', system: '', maxTokens: 4096, effort: '', model: '' }
 let conversations = [], activeId, connection = { connected: false, models: [] }, busy = false, requestController, pendingDelete
 let providerStates = {}, loginProvider, authPoll, runtimeStatus = { enabled: false, capabilities: [] }
+let currentWorkspace = ''
 const providerName = p => p === 'openai' ? 'OpenAI' : 'Claude'
 let renderQueued = false, toastTimer, storageWarned = false
 const uid = () => crypto.randomUUID()
@@ -35,7 +36,7 @@ function toast(message) { $('toast').textContent = message; $('toast').hidden = 
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('Copied to clipboard') } catch { toast('Clipboard unavailable. Select the text to copy it.') } }
 function inline(parent, text) {
   // Build nodes rather than inserting HTML: model output is always untrusted.
-  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g
+  const pattern = /(`[^`\n]+`|\*\*[^*\\n]+\*\*|\*[^*\\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g
   let last = 0
   for (const match of text.matchAll(pattern)) {
     parent.append(document.createTextNode(text.slice(last, match.index)))
@@ -222,12 +223,23 @@ function selectConnection() {
   $('max-tokens').title = provider === 'openai' ? 'OpenAI subscription responses use the provider’s default length.' : ''
   $('prompt').placeholder = `Message ${name}…`
 }
+function updateWorkspaceUI() {
+  if (!currentWorkspace) return
+  const short = currentWorkspace.split('/').filter(Boolean).slice(-2).join('/') || currentWorkspace
+  if ($('workspace-path')) $('workspace-path').textContent = short
+  if ($('workspace-indicator')) $('workspace-indicator').title = currentWorkspace
+  if ($('workspace-input')) $('workspace-input').value = currentWorkspace
+}
 async function connect() {
   $('refresh-connection').disabled = true
   try {
     const response = await fetch('/api/status'), value = await response.json()
     if (!response.ok) throw new Error(value.error || 'Connection unavailable')
     connection.csrf = value.csrf; providerStates = value.providers || { claude: value }; runtimeStatus = value.agentRuntime || { enabled: false, capabilities: [] }
+    if (value.workspace?.cwd) {
+      currentWorkspace = value.workspace.cwd
+      updateWorkspaceUI()
+    }
     $('runtime-detail').textContent = runtimeStatus.enabled
       ? `v${runtimeStatus.version} · SDK profile · Files, shell, skills, goals, subagents, and compaction enabled.`
       : 'Adapter-only mode is active.'
@@ -276,6 +288,98 @@ async function logout(provider) {
     if (loginProvider === provider) { clearInterval(authPoll); loginProvider = undefined; $('login-panel').hidden = true }
     await connect(); toast(`${providerName(provider)} logged out of Frontier`)
   } catch (error) { toast(error.message); $(`logout-${provider}`).disabled = false }
+}
+async function saveWorkspace() {
+  const target = $('workspace-input').value.trim()
+  if (!target) return
+  $('save-workspace-button').disabled = true
+  try {
+    const res = await fetch('/api/workspace', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-frontier-token': connection.csrf },
+      body: JSON.stringify({ cwd: target }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Failed to switch workspace')
+    currentWorkspace = data.cwd
+    updateWorkspaceUI()
+    const chat = current()
+    delete chat.agent
+    persist()
+    toast(`Workspace switched: ${currentWorkspace}`)
+  } catch (err) {
+    toast(err.message)
+  } finally {
+    $('save-workspace-button').disabled = false
+  }
+}
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.append(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+function exportConversationAsJson() {
+  const chat = current()
+  const data = JSON.stringify(chat, null, 2)
+  downloadFile(`${chat.title.slice(0, 30).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`, data, 'application/json')
+  $('export-dialog').close()
+  toast('Exported JSON')
+}
+function exportConversationAsMarkdown() {
+  const chat = current()
+  let md = `# ${chat.title}\n\n`
+  md += `**Date:** ${new Date(chat.updatedAt).toLocaleString()}  \n`
+  md += `**Provider:** ${providerName(chat.settings.provider)}  \n`
+  md += `**Model:** ${chat.settings.model || 'default'}  \n\n`
+  if (chat.settings.system) {
+    md += `## Instructions\n\n${chat.settings.system}\n\n---\n\n`
+  }
+  for (const m of chat.messages) {
+    const roleName = m.role === 'user' ? 'User' : providerName(m.provider || chat.settings.provider)
+    md += `### ${roleName}\n\n${m.text || ''}\n\n`
+    if (m.reasoning) {
+      md += `> **Reasoning:** ${m.reasoning}\n\n`
+    }
+  }
+  downloadFile(`${chat.title.slice(0, 30).replace(/[^a-zA-Z0-9_-]/g, '_')}.md`, md, 'text/markdown')
+  $('export-dialog').close()
+  toast('Exported Markdown')
+}
+function importConversationJson(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result)
+      if (!data || typeof data !== 'object' || !Array.isArray(data.messages)) {
+        throw new Error('Invalid conversation JSON file.')
+      }
+      const imported = {
+        ...newConversation(),
+        title: typeof data.title === 'string' ? data.title : 'Imported conversation',
+        settings: { ...defaults, ...(data.settings || {}) },
+        messages: data.messages.filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.text === 'string').map(m => ({ ...m, status: 'complete' })),
+        updatedAt: Date.now(),
+      }
+      conversations.unshift(imported)
+      activeId = imported.id
+      persist()
+      renderConversation()
+      toast('Conversation imported')
+    } catch (err) {
+      toast(err.message || 'Failed to import conversation')
+    } finally {
+      $('import-file-input').value = ''
+    }
+  }
+  reader.readAsText(file)
 }
 function queueRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(() => { renderQueued = false; renderMessages() }) } }
 async function sendMessage(event) {
@@ -350,6 +454,7 @@ function openSettings() {
   const settings = current().settings
   $('instructions').value = settings.system; $('max-tokens').value = String(settings.maxTokens)
   $('custom-model').value = connection.models.some(m => m.id === settings.model) ? '' : settings.model
+  if ($('workspace-input')) $('workspace-input').value = currentWorkspace
   updateEfforts(); $('settings-dialog').showModal()
 }
 function saveSettings() {
@@ -402,6 +507,14 @@ $('new-chat').onclick = () => { if (busy) return; if (!current().messages.length
 for (const button of document.querySelectorAll('[data-prompt]')) button.onclick = () => { $('prompt').value = button.dataset.prompt; $('prompt').focus(); updateControls() }
 $('settings-button').onclick = openSettings; $('connection-button').onclick = openSettings; $('close-settings').onclick = () => $('settings-dialog').close()
 $('save-settings').onclick = saveSettings; $('refresh-connection').onclick = connect; $('usage-button').onclick = loadUsage
+$('save-workspace-button').onclick = saveWorkspace
+$('export-chat-button').onclick = () => $('export-dialog').showModal()
+$('export-md-button').onclick = exportConversationAsMarkdown
+$('export-json-button').onclick = exportConversationAsJson
+$('close-export-dialog').onclick = () => $('export-dialog').close()
+$('import-chat-button').onclick = () => $('import-file-input').click()
+$('import-file-input').onchange = importConversationJson
+$('workspace-indicator').onclick = openSettings
 $('menu-button').onclick = () => sidebar(!$('sidebar').classList.contains('open')); $('sidebar-backdrop').onclick = () => sidebar(false)
 $('cancel-delete').onclick = () => $('delete-dialog').close()
 $('confirm-delete').onclick = () => {
