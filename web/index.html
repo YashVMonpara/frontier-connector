@@ -3,12 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Your local Claude and OpenAI chat workspace, powered by Frontier connector.">
+  <meta name="description" content="Direct local connector and OpenAI/Anthropic API gateway for Claude and OpenAI subscriptions.">
   <meta name="theme-color" content="#14191e">
-  <title>Frontier — AI workspace</title>
+  <title>Frontier — Subscription Connector</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/runtime.css">
   <script src="/app.js" type="module"></script>
 </head>
 <body>
@@ -29,7 +28,6 @@
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9S4 17 4 12V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
     <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V3m5 5-5-5-5 5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2 6a2 2 0 0 1 2-2h4l2 2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Z"/></symbol>
   </svg>
   <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="Close navigation" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
@@ -46,24 +44,23 @@
     <nav id="history" class="history" aria-label="Saved conversations"><p class="history-empty">A little room for your next big idea.</p></nav>
     <div class="sidebar-footer">
       <div class="local-note"><svg><use href="#i-shield"/></svg><span>Saved in this browser</span></div>
-      <button id="connection-button" class="account-button"><span class="account-avatar">F</span><span class="account-copy"><strong>Connections</strong><span id="sidebar-status">Checking connection…</span></span><svg><use href="#i-sliders"/></svg></button>
+      <button id="connection-button" class="account-button"><span class="account-avatar">F</span><span class="account-copy"><strong>Connections & API</strong><span id="sidebar-status">Checking connection…</span></span><svg><use href="#i-sliders"/></svg></button>
     </div>
   </aside>
   <main class="workspace">
     <header class="topbar">
-      <div class="topbar-left"><button id="menu-button" class="icon-button mobile-only" aria-label="Open navigation" aria-expanded="false"><svg><use href="#i-menu"/></svg></button><span class="workspace-label">WORKSPACE</span><span class="topbar-divider">/</span><span id="chat-title" class="chat-title">New conversation</span></div>
+      <div class="topbar-left"><button id="menu-button" class="icon-button mobile-only" aria-label="Open navigation" aria-expanded="false"><svg><use href="#i-menu"/></svg></button><span class="workspace-label">CONNECTOR</span><span class="topbar-divider">/</span><span id="chat-title" class="chat-title">New conversation</span></div>
       <div class="topbar-right">
-        <span id="workspace-indicator" class="workspace-indicator" title="Current workspace directory"><svg><use href="#i-folder"/></svg><span id="workspace-path">Loading workspace…</span></span>
         <span id="connection-status" class="connection-status"><span class="status-dot"></span><span>Connecting</span></span>
-        <button id="settings-button" class="icon-button" aria-label="Conversation settings" title="Conversation settings"><svg><use href="#i-sliders"/></svg></button>
+        <button id="settings-button" class="icon-button" aria-label="Connections and settings" title="Connections and settings"><svg><use href="#i-sliders"/></svg></button>
       </div>
     </header>
     <div id="scroll-area" class="scroll-area">
       <section id="welcome" class="welcome">
         <div class="welcome-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="56" height="56"></div>
-        <div class="eyebrow">A SPACE TO THINK BIG</div>
+        <div class="eyebrow">DIRECT SUBSCRIPTION CONNECTOR</div>
         <h1>Where should we start?</h1>
-        <p>Bring your questions, unfinished ideas, and next projects.</p>
+        <p>Connect your Claude and OpenAI subscriptions locally, test prompts here, or point any app to the local API endpoints.</p>
         <div class="suggestions">
           <button data-prompt="Help me turn a rough idea into a clear, compelling piece of writing. Start by asking me what I have in mind."><svg><use href="#i-pen"/></svg><strong>Find the right words</strong><span>Make your next draft a good one</span></button>
           <button data-prompt="Help me think through a decision. Ask me about the options, what matters most, and what I am uncertain about."><svg><use href="#i-spark"/></svg><strong>Think it through</strong><span>A fresh perspective on an idea</span></button>
@@ -82,23 +79,26 @@
           <div class="composer-actions"><span id="composer-hint">Enter to send</span><button id="send-button" class="send-button" type="submit" aria-label="Send message" disabled><svg><use href="#i-arrow"/></svg></button><button id="stop-button" class="send-button stop-button" type="button" aria-label="Stop response" hidden><span></span></button></div>
         </div>
       </form>
-      <div class="composer-footer"><span id="response-status">Your ideas. A little more possible.</span><span>Frontier <span class="footer-dot">·</span> Local workspace</span></div>
+      <div class="composer-footer"><span id="response-status">Your ideas. A little more possible.</span><span>Frontier <span class="footer-dot">·</span> Direct local connector</span></div>
     </div>
   </main>
   <dialog id="settings-dialog" class="settings-dialog">
-    <div class="dialog-header"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Conversation settings</h2></div><button class="icon-button" id="close-settings" aria-label="Close settings"><svg><use href="#i-close"/></svg></button></div>
+    <div class="dialog-header"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Connections & API Gateway</h2></div><button class="icon-button" id="close-settings" aria-label="Close settings"><svg><use href="#i-close"/></svg></button></div>
     <section class="provider-connections" aria-label="Provider connections">
       <div class="provider-card"><span class="provider-avatar">C</span><div class="provider-info"><strong>Claude</strong><span id="claude-auth-status">Checking…</span></div><button class="connect-provider primary-button" data-provider="claude" id="connect-claude">Connect</button><button class="logout-provider secondary-button" data-provider="claude" id="logout-claude" hidden>Log out</button></div>
       <div class="provider-card"><span class="provider-avatar openai-avatar">O</span><div class="provider-info"><strong>OpenAI</strong><span id="openai-auth-status">Checking…</span></div><button class="connect-provider primary-button" data-provider="openai" id="connect-openai">Connect</button><button class="logout-provider secondary-button" data-provider="openai" id="logout-openai" hidden>Log out</button></div>
     </section>
     <div id="login-panel" class="login-panel" hidden><strong id="login-title">Finish signing in</strong><p>Continue in your browser. This page updates when you’re connected.</p><a id="login-link" class="primary-button" target="_blank" rel="noopener noreferrer">Continue to sign in</a><details><summary>Callback didn’t return?</summary><label for="login-callback" class="field-label">Paste the full callback URL</label><input id="login-callback" type="password" autocomplete="off" placeholder="http://localhost:…"><button id="submit-callback" class="text-button">Complete sign-in</button></details><button id="cancel-login" class="text-button">Cancel sign-in</button></div>
     <div class="connection-card"><div><strong id="settings-connection">Checking connection</strong><p id="connection-detail">Using the session on this computer.</p></div><button id="refresh-connection" class="icon-button" aria-label="Refresh connections" title="Refresh connections"><svg><use href="#i-refresh"/></svg></button></div>
-    <div class="runtime-card"><span class="runtime-dot"></span><div><strong>DeepSeek Harness agent runtime</strong><p id="runtime-detail">Starting the complete agent runtime…</p></div></div>
+    <section class="gateway-card" aria-label="Connect external apps">
+      <strong>Connect external apps</strong>
+      <p>Point any OpenAI- or Anthropic-compatible app, SDK, or editor directly to your local subscriptions.</p>
+      <div class="endpoint-row"><span>OpenAI base URL</span><code id="gateway-openai-url">http://127.0.0.1:4317/v1</code><button id="copy-openai-url" class="text-button" type="button">Copy</button></div>
+      <div class="endpoint-row"><span>Anthropic base URL</span><code id="gateway-anthropic-url">http://127.0.0.1:4317</code><button id="copy-anthropic-url" class="text-button" type="button">Copy</button></div>
+    </section>
     <p class="logout-note">Log out disconnects this app only. Your chats and other apps stay signed in.</p>
     <div id="login-help" hidden></div>
-    <label class="field-label" for="workspace-input">Workspace directory<span>Folder where the agent creates and modifies files.</span></label>
-    <div class="workspace-row"><input id="workspace-input" placeholder="/path/to/project" autocomplete="off"><button id="save-workspace-button" class="secondary-button" type="button">Switch</button></div>
-    <label class="field-label" for="instructions">Custom instructions<span>How would you like the selected agent to respond?</span></label>
+    <label class="field-label" for="instructions">Custom instructions<span>How would you like the selected model to respond?</span></label>
     <textarea id="instructions" rows="4" maxlength="20000" placeholder="For example: Be concise. Explain your assumptions."></textarea>
     <div class="settings-grid"><div><label class="field-label" for="max-tokens">Response length</label><select id="max-tokens"><option value="2048">Short · 2k</option><option value="4096" selected>Standard · 4k</option><option value="8192">Long · 8k</option><option value="16384">Extended · 16k</option></select></div><div><label class="field-label" for="effort">Reasoning effort</label><select id="effort"><option value="">Model default</option></select></div></div>
     <label class="field-label" for="custom-model">Custom model ID<span>Optional. Use a model available to your account.</span></label><input id="custom-model" placeholder="e.g. claude-sonnet-5" maxlength="128">

@@ -9,14 +9,14 @@ import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmError,
-} from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '../compat.js'
+  ToolCallId,
+} from '../types.js'
 import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
   ToolSchema,
-} from '@deepseek-ai/dsh-llm'
+} from '../types.js'
 import { parseSse } from './sse.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 

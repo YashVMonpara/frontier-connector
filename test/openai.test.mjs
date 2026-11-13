@@ -51,7 +51,7 @@ test('web routes OpenAI separately and logout preserves the other provider', asy
   const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
   await store.save(session()); await target.save(session({ accountId: 'account' }))
   const adapter = { listModels: async () => [], resolveModel: async (_, id) => ({ id }), usage: async () => ({}), async *stream() { yield { type: 'text-delta', index: 0, text: 'OpenAI response' }; yield { type: 'finish', reason: { kind: 'stop' } } } }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, openaiAdapter: adapter, agentRuntime: false })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, openaiAdapter: adapter })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (path, body, token = status.csrf) => fetch(`${url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': token }, body: JSON.stringify(body) })
@@ -90,7 +90,7 @@ test('OpenAI rejects a non-SSE response even with a successful HTTP status', asy
   await assert.rejects(collect(adapter.stream(options({ provider: 'openai' }))), /before response.completed/)
 })
 
-test('OpenAI sends Harness tools as non-strict Responses functions', async t => {
+test('OpenAI sends tools as non-strict Responses functions', async t => {
   const { store } = await fixture(t), target = openaiStore(`${store.path}.openai`)
   await target.save(session({ accountId: 'account' }))
   let body
@@ -124,7 +124,7 @@ test('OpenAI image input fails explicitly without an attachment resolver', async
   const adapter = new OpenAIAdapter({ authFile: target.path, fetchFn: async () => { fetched = true; return Response.json({}) } })
   const input = options({ provider: 'openai' })
   input.messages[0] = { ...input.messages[0], content: [...input.messages[0].content, { type: 'image', attachment: { attachmentId: 'fake' } }] }
-  await assert.rejects(collect(adapter.stream(input)), /no attachments service/)
+  await assert.rejects(collect(adapter.stream(input)), /no attachment resolver/)
   assert.equal(fetched, false)
 })
 

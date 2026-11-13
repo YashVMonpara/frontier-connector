@@ -1,52 +1,42 @@
 # Implementation map
 
-`src/index.ts` registers the Claude and OpenAI adapters with DSH and disposes both registrations when the plugin unloads. `src/runtime/harness.ts` owns one official SDK-profile subprocess per active browser conversation, exported through the stable `src/agent-runtime.ts` facade. `src/runtime/activity.ts` translates SDK notifications into bounded UI events. `src/http/chat.ts` validates incoming conversations and constructs agent prompts. `src/cli.ts` provides explicit Claude auth commands and one-turn streaming without a running DSH profile.
+`src/index.ts` exposes the standalone library and server APIs with zero runtime npm dependencies. `src/connector.ts` unifies `ClaudeAdapter` and `OpenAIAdapter` behind model/provider routing (`FrontierConnector`). `src/gateway.ts` and `src/http/gateway-translate.ts` expose standard OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), and `/v1/models` endpoints so any external app or SDK can connect directly. `src/web-server.ts` serves the browser management/chat interface and mounts the gateway routes on the same loopback server. `src/cli.ts` exposes `auth`, `models`, `usage`, `chat`, `serve`, and `web` commands.
 
 ```text
-Browser -> HarnessAgentRuntime -> `dsh --profile sdk`
-                              |-- agent loop / tools / sandbox / sessions
-                              |-- skills / goals / subagents / compaction
-                              `-- ClaudeAdapter or OpenAIAdapter
-
-ClaudeAdapter
-  |-- TokenManager -> locked TokenStore -> refresh grant / linked source
-  `-- Anthropic messages -> SSE -> DSH StreamChunks
-
-OpenAIAdapter
-  |-- OpenAITokens -> locked provider-specific store -> refresh grant
-  `-- Responses input + function tools -> SSE -> DSH StreamChunks
+External App / SDK ──► Gateway (/v1/chat/completions, /v1/messages, /v1/responses, /v1/models)
+Browser UI         ──► Web Server (/api/auth/*, /api/chat, /api/usage)
+Node.js App        ──► FrontierConnector (stream / generate / listModels)
+                             │
+             ┌───────────────┴───────────────┐
+             ▼                               ▼
+       ClaudeAdapter                   OpenAIAdapter
+   TokenManager + TokenStore      OpenAITokens + openaiStore
+   Anthropic Messages SSE         ChatGPT Responses SSE
 ```
 
-## Files
+## Modules
 
 | Module | Responsibility |
 | --- | --- |
-| `auth/oauth.ts` | PKCE, callback listener, state validation, token exchange and refresh |
-| `auth/store.ts` | Versioned store, permissions, atomic replacement and transaction locks |
-| `auth/source.ts` | Explicit Keychain/file import and file refresh synchronization |
-| `auth/manager.ts` | Re-read current source, preemptive refresh, rejected-token recovery |
-| `claude.ts` | DSH contract, credentials/headers, request body, catalog, usage, streaming |
-| `transport.ts` | HTTP error classification, reset parsing, cancellable waits, watchdog |
-| `translate/anthropic.ts` | Request translation, cache markers and SSE event state machine |
-| `translate/sse.ts` | Incremental framing and upstream cancellation on iterator exit |
-| `translate/resolved.ts` | Attachment references to inline image bytes |
-
-## Differences from the supplied teardown
-
-- The reference checked at commit `1a2777ca2c68dd4e3c08072b97b9ab36e98bfa9b` uses a static Claude catalog by default. This connector also defaults to a static catalog, with explicit live discovery available. Capabilities not observed or configured are not assumed.
-- The token file belongs to this connector rather than modifying the original plugin's store. Import is explicit. Fresh logins have independent automatic refresh.
-- Keychain imports are read-only at the source; Claude Code owns their refresh. File imports synchronize rotations back while preserving unrelated fields. A compare-before-write check detects an already-changed token, but cannot provide an atomic transaction with the official CLI.
-- The default rate-limit waiting budget is one minute and one retry, configurable. No unknown reset is guessed. Transport errors, 5xx errors, and in-band SSE errors are surfaced without automatic replay.
-- HTTP 401s can be retried before streaming starts. An error after chunks were emitted ends that stream to avoid duplicated visible content or tool calls.
-- The standalone CLI displays tool calls; the embedded web runtime and externally hosted DSH profiles execute them.
-- API-key mode uses a distinct header and system-prompt path. It never silently substitutes for subscription auth.
+| `types.ts` | Self-contained messages, content blocks, stream chunks, tool schemas, and `LlmError` |
+| `auth/oauth.ts` | PKCE S256, loopback callback listener, state validation, token exchange and refresh |
+| `auth/store.ts` | Versioned private JSON store (`0600`), atomic replacement, cross-process lockfiles |
+| `auth/source.ts` | Explicit Claude Code Keychain/file import and file refresh synchronization |
+| `auth/manager.ts` | Coordinated Claude token reads, preemptive refresh, rejected-token recovery |
+| `auth/openai.ts` | ChatGPT OAuth grant, JWT account ID extraction, locked OpenAI token refresh |
+| `claude.ts` | Claude subscription & API-key transport, catalog discovery, usage, streaming |
+| `openai.ts` | OpenAI ChatGPT subscription transport, model discovery, encrypted reasoning replay, streaming |
+| `connector.ts` | Unified `FrontierConnector` router, model prefixing (`claude/`, `openai/`), `generate()` helper |
+| `gateway.ts` | Standalone HTTP gateway server, Host/Origin/API-key security, SSE/JSON protocol handlers |
+| `http/gateway-translate.ts` | OpenAI Chat, OpenAI Responses, and Anthropic Messages request/response translators |
+| `http/chat.ts` | Web UI chat payload validation |
+| `web-server.ts` | Loopback Web UI server + embedded gateway routes |
+| `transport.ts` | HTTP error classification, reset parsing, cancellable waits, stream idle watchdog |
+| `translate/anthropic.ts` | Anthropic wire messages, cache markers, and SSE event translator |
+| `translate/responses.ts` | OpenAI Responses input, tool schemas, encrypted reasoning capture, and SSE translator |
+| `translate/sse.ts` | Incremental SSE byte-stream framing and upstream cancellation |
+| `translate/resolved.ts` | Inline base64 / `data:` URL image passthrough and optional `AttachmentStore` resolution |
 
 ## Provenance
 
-`translate/anthropic.ts`, `translate/sse.ts`, `translate/resolved.ts`, and `translate/responses.ts` derive from the reference's corresponding MIT-licensed files. Local changes add the API-key system-prompt path, initial text/thinking handling, zero-argument tool normalization, an SSE event size bound, cancellation cleanup, and connector-specific error text. See `THIRD_PARTY_LICENSES` for the original copyright and permission notice.
-
-## Local web providers
-
-`web-server.ts` serves the local interface and sends each chat turn to `HarnessAgentRuntime`. That manager starts the official `sdk` profile with `frontier-agent.patch.yml`, pins the chosen provider/model route, and reuses its durable session across turns. The profile owns the agent loop, file and shell tools, sandbox policy, skills, goals, subagents, and compaction. Stopping a turn reaps that conversation's subprocess because SDK `0.1.5-rc.2` has no mid-turn cancel method.
-
-`auth/openai.ts` implements ChatGPT OAuth and locked token refresh; `openai.ts` discovers account models, maps Harness function schemas into Responses tools, and translates text, reasoning, function calls, usage, and terminal events back into DSH stream chunks. Each provider has a separate credential store and logout state. Logging out also closes that provider's resident Harness processes so credentials do not remain in an idle child.
+`translate/anthropic.ts`, `translate/sse.ts`, `translate/resolved.ts`, and `translate/responses.ts` were originally adapted from MIT-licensed files in `V1ki/dsh-plugin-subscriptions` and refactored for standalone operation without any external harness dependencies. See `THIRD_PARTY_LICENSES` for the original copyright and permission notice.

@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from './types.js'
 
 export class HttpError extends LlmError {
   constructor(readonly status: number, readonly retryAfterMs?: number) {

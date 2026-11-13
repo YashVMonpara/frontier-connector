@@ -1,14 +1,14 @@
 # Security
 
-This is an experimental local application. Only the latest source revision receives fixes. The server binds to loopback; it is not designed to be exposed directly to the internet.
+This is an experimental local application. Only the latest source revision receives fixes. The server binds to loopback (`127.0.0.1`) by default; it is not designed to be exposed directly to the public internet without additional network isolation and authentication.
 
-Please use GitHub's private vulnerability reporting feature if it is enabled on this repository. Do not post credentials, tokens, full OAuth callback URLs, or exploitable security details in public issues. If private reporting is unavailable, open an issue requesting a private contact channel without disclosing the vulnerability.
+Please use GitHub's private vulnerability reporting feature if it is enabled on this repository. Do not post credentials, tokens, full OAuth callback URLs, or exploitable security details in public issues.
 
-Credentials are stored on the local filesystem with restricted permissions. Conversations are stored in browser local storage. Logout removes this connector's session; it does not revoke provider tokens or sign out other applications. Avoid sharing your local machine account or exposing the local server through a tunnel.
+## Threat Model & Protections
 
-Web conversations run an agent with file and shell tools in the server's working
-directory. Start the server from a workspace you intend the agent to access.
-Harness session logs persist under `~/.config/frontier-connector/harness`;
-browser activity traces can also contain file contents and tool output.
-The SDK transport cannot display interactive approval prompts, so operations
-requiring those prompts fail closed under the default workspace policy.
+- **Local Credential Storage**: OAuth tokens are stored in `~/.config/frontier-connector/auth.json` (Claude) and `auth.json.openai` (OpenAI) using atomic writes with mode `0600` inside `0700` directories, coordinated via filesystem locks.
+- **DNS Rebinding & CSRF Protection**: Both the Web UI and `/v1/*` API gateway validate `Host` headers strictly against the bound host and port. Web UI endpoints (`/api/*`) require a per-process random CSRF token (`x-frontier-token`) and matching same-origin headers.
+- **Cross-Origin Browser Blocking**: Requests to `/v1/*` carrying a cross-site `Origin` header are rejected (`403`) unless explicitly configured via `allowCorsOrigins`.
+- **Optional Gateway Authentication**: Passing `--gateway-key` or `FRONTIER_GATEWAY_KEY` enforces `Authorization: Bearer <key>` or `x-api-key: <key>` checks (constant-time `timingSafeEqual`) across all `/v1/*` endpoints.
+- **No Credential Echoing**: Auth, OAuth, HTTP, and Web status endpoints never leak tokens or upstream secret payloads.
+- **Browser Local Storage**: Web UI conversation history stays in browser local storage (`frontier.connector.v1`). Logout removes Frontier's local session without revoking provider tokens in official apps.

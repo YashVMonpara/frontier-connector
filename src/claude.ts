@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { LlmError, ReasoningEffortId } from './types.js'
+import type { AttachmentStore, ConnectorAdapter, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from './types.js'
 import { TokenManager } from './auth/manager.js'
 import { TokenStore } from './auth/store.js'
 import type { Fetch } from './auth/oauth.js'
@@ -87,7 +86,7 @@ export function requestBody(options: GenerateOptions, messages: readonly Transla
   }
 }
 
-export class ClaudeAdapter extends LlmAdapter {
+export class ClaudeAdapter implements ConnectorAdapter {
   readonly tokens: TokenManager
   private readonly fetchFn: Fetch
   private readonly subscription: boolean
@@ -96,7 +95,6 @@ export class ClaudeAdapter extends LlmAdapter {
   private catalogPending?: Promise<Model[]>
 
   constructor(private readonly config: ConnectorOptions = {}) {
-    super()
     if (config.authMode !== undefined && config.authMode !== 'subscription' && config.authMode !== 'api-key') throw new Error('authMode must be subscription or api-key.')
     if (config.models !== undefined && (!Array.isArray(config.models) || config.models.some(m => !m || typeof m.id !== 'string' || !m.id || (m.efforts !== undefined && (!Array.isArray(m.efforts) || m.efforts.some(e => typeof e !== 'string')))))) throw new Error('models must contain valid model IDs and effort strings.')
     this.subscription = (config.authMode ?? 'subscription') === 'subscription'
@@ -107,7 +105,7 @@ export class ClaudeAdapter extends LlmAdapter {
     }
   }
 
-  override providerInfo(provider: string) { return { id: provider, name: this.subscription ? 'Claude (Frontier subscription)' : 'Claude (Frontier API)' } }
+  providerInfo(provider: string) { return { id: provider, name: this.subscription ? 'Claude (Frontier subscription)' : 'Claude (Frontier API)' } }
 
   private async headers(rejected?: string): Promise<Headers> {
     const headers = new Headers({ 'anthropic-version': '2023-06-01', 'content-type': 'application/json' })
@@ -123,7 +121,7 @@ export class ClaudeAdapter extends LlmAdapter {
       const key = this.config.apiKey ?? process.env.ANTHROPIC_API_KEY
       if (!key) throw new Error('Set ANTHROPIC_API_KEY for API-key mode.')
       headers.set('x-api-key', key)
-      headers.set('user-agent', 'frontier-connector/0.1.0')
+      headers.set('user-agent', 'frontier-connector/0.2.0')
     }
     return headers
   }
@@ -190,13 +188,13 @@ export class ClaudeAdapter extends LlmAdapter {
     try { return await this.catalogPending } finally { this.catalogPending = undefined }
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+  async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     if (this.subscription && !await this.tokens.store.read()) return []
     if (!this.subscription && !(this.config.apiKey ?? process.env.ANTHROPIC_API_KEY)) return []
     return (await this.catalogModels()).map(m => ({ provider, id: m.id, name: m.name ?? m.id, inputModalities: ['text', 'image'] }))
   }
 
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+  async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const entry = (this.catalog?.models ?? this.config.models ?? DEFAULT_MODELS).find(m => m.id === model)
     return {
       provider, id: model, name: entry?.name ?? model, inputModalities: ['text', 'image'],
@@ -212,7 +210,7 @@ export class ClaudeAdapter extends LlmAdapter {
     return response.json()
   }
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     options.signal?.throwIfAborted()
     const messages = await resolveImages(options.messages, this.config.resolveAttachments?.(), options.signal)
     if (this.config.discovery) await this.catalogModels()

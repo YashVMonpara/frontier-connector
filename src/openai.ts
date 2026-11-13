@@ -1,6 +1,5 @@
-import { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { ReasoningEffortId } from './types.js'
+import type { AttachmentStore, ConnectorAdapter, GenerateOptions, LlmResolvedModelInfo, StreamChunk } from './types.js'
 import { OpenAITokens, openaiStore } from './auth/openai.js'
 import type { Fetch } from './auth/oauth.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from './translate/responses.js'
@@ -16,19 +15,18 @@ export interface OpenAIOptions {
   resolveAttachments?: () => AttachmentStore | undefined
 }
 
-export class OpenAIAdapter extends LlmAdapter {
+export class OpenAIAdapter implements ConnectorAdapter {
   readonly tokens: OpenAITokens
   private readonly fetchFn: Fetch
   private catalog?: { expires: number; models: LlmResolvedModelInfo[] }
   private readonly reasoningCache = new Map<string, readonly ReasoningReplayItem[]>()
 
   constructor(private readonly config: OpenAIOptions = {}) {
-    super()
     this.fetchFn = config.fetchFn ?? fetch
     this.tokens = new OpenAITokens(openaiStore(config.authFile), this.fetchFn)
   }
 
-  override providerInfo(provider: string) { return { id: provider, name: 'OpenAI (ChatGPT)' } }
+  providerInfo(provider: string) { return { id: provider, name: 'OpenAI (ChatGPT)' } }
   invalidate() { this.catalog = undefined }
 
   private async request(path: string, init: RequestInit, signal: AbortSignal) {
@@ -39,7 +37,7 @@ export class OpenAIAdapter extends LlmAdapter {
       const response = await this.fetchFn(`https://chatgpt.com${path}`, {
         ...init, signal, redirect: 'error', headers: {
           authorization: `Bearer ${session.accessToken}`, 'chatgpt-account-id': session.accountId!, originator: 'codex_cli_rs',
-          'user-agent': 'frontier-connector/0.1.0', 'content-type': 'application/json', accept: init.method === 'POST' ? 'text/event-stream' : 'application/json',
+          'user-agent': 'frontier-connector/0.2.0', 'content-type': 'application/json', accept: init.method === 'POST' ? 'text/event-stream' : 'application/json',
         },
       })
       if (response.status === 401 && attempt === 0) { rejected = session.accessToken; await response.body?.cancel(); continue }
@@ -48,26 +46,26 @@ export class OpenAIAdapter extends LlmAdapter {
     }
   }
 
-  override async listModels(provider: string): Promise<LlmResolvedModelInfo[]> {
+  async listModels(provider: string): Promise<LlmResolvedModelInfo[]> {
     if (!await this.tokens.store.read()) return []
     if (this.catalog && this.catalog.expires > Date.now()) return this.catalog.models.map(m => ({ ...m, provider }))
     const response = await this.request(`/backend-api/codex/models?client_version=${encodeURIComponent(this.config.clientVersion ?? '0.153.4')}`, { method: 'GET' }, AbortSignal.timeout(30_000))
     const data = await response.json() as { models?: { slug: string; display_name?: string; visibility?: string; supported_reasoning_levels?: { effort: string; description?: string }[] }[] }
     if (!Array.isArray(data.models)) throw new Error('OpenAI returned an invalid model list.')
     const models = data.models.filter(m => typeof m.slug === 'string' && m.visibility !== 'hide' && m.visibility !== 'none').map(m => ({
-      provider, id: m.slug, name: m.display_name || m.slug,
+      provider, id: m.slug, name: m.display_name || m.slug, inputModalities: ['text', 'image'] as const,
       reasoning: { efforts: (m.supported_reasoning_levels ?? []).filter(e => typeof e.effort === 'string').map(e => ({ id: ReasoningEffortId(e.effort), name: e.effort })) },
     }))
     this.catalog = { models, expires: Date.now() + 300_000 }; return models
   }
 
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return this.catalog?.models.find(m => m.id === model) ?? { provider, id: model, name: model }
+  async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return this.catalog?.models.find(m => m.id === model) ?? { provider, id: model, name: model, inputModalities: ['text', 'image'] }
   }
 
   async usage() { return (await this.request('/backend-api/wham/usage', { method: 'GET' }, AbortSignal.timeout(30_000))).json() }
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     options.signal?.throwIfAborted()
     const messages = await resolveImages(options.messages, this.config.resolveAttachments?.(), options.signal)
     const resolved = toResponsesInput(messages, options.system, callId => this.reasoningCache.get(callId))
