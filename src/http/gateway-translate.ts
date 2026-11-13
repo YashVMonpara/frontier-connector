@@ -64,6 +64,22 @@ function contentBlocksFromOpenAI(content: unknown): ContentBlock[] {
   return blocks
 }
 
+/** Never silently weaken a caller's tool restrictions. */
+function applyToolChoice(req: Record<string, unknown>, tools: ToolSchema[] | undefined, anthropic = false): ToolSchema[] | undefined {
+  if (req.tool_choice === undefined) return tools
+  let choice: unknown = req.tool_choice
+  if (anthropic) {
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice) ||
+        Object.keys(choice).some(key => key !== 'type')) {
+      throw new RequestError('Only tool_choice auto and none are supported.')
+    }
+    choice = (choice as Record<string, unknown>).type
+  }
+  if (choice === 'none') return undefined
+  if (choice === 'auto') return tools
+  throw new RequestError('Only tool_choice auto and none are supported; required and named tool choices are unsupported.')
+}
+
 export function parseOpenAIChatRequest(body: unknown, explicitProvider?: ProviderId): ParsedGatewayRequest {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new RequestError('Invalid request body.')
@@ -136,6 +152,7 @@ export function parseOpenAIChatRequest(body: unknown, explicitProvider?: Provide
     })
   }
 
+  tools = applyToolChoice(req, tools)
   const maxTokensRaw = req.max_completion_tokens ?? req.max_tokens
   const maxTokens = typeof maxTokensRaw === 'number' ? maxTokensRaw : undefined
   const temperature = typeof req.temperature === 'number' ? req.temperature : undefined
@@ -239,6 +256,7 @@ export function parseAnthropicMessagesRequest(body: unknown, explicitProvider?: 
     })
   }
 
+  tools = applyToolChoice(req, tools, true)
   const outputConfig = req.output_config && typeof req.output_config === 'object' ? req.output_config as Record<string, unknown> : undefined
   const reasoningEffort = typeof outputConfig?.effort === 'string' ? outputConfig.effort : undefined
   const maxTokens = typeof req.max_tokens === 'number' ? req.max_tokens : 4096
@@ -325,6 +343,7 @@ export function parseResponsesRequest(body: unknown, explicitProvider?: Provider
     })
   }
 
+  tools = applyToolChoice(req, tools)
   const reasoning = req.reasoning && typeof req.reasoning === 'object' ? req.reasoning as Record<string, unknown> : undefined
   const reasoningEffort = typeof reasoning?.effort === 'string' ? reasoning.effort : undefined
   const maxTokens = typeof req.max_output_tokens === 'number' ? req.max_output_tokens : undefined

@@ -4,7 +4,7 @@ import { get } from 'node:http'
 import { startWebServer } from '../dist/web-server.js'
 import { fixture, session } from './helpers.mjs'
 
-async function web(t, overrides = {}) {
+async function web(t, overrides = {}, config = {}) {
   const { store } = await fixture(t)
   await store.save(session())
   const calls = []
@@ -19,7 +19,7 @@ async function web(t, overrides = {}) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     }, ...overrides,
   }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path, ...config }, adapter })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (body, headers = {}) => fetch(`${url}/api/chat`, {
@@ -106,4 +106,62 @@ test('web app markdown pattern matches bold and italic words containing n', asyn
   assert.ok('**conversation**'.match(pattern), 'bold word with n must match')
   assert.ok('**new**'.match(pattern), 'bold new must match')
   assert.ok('*function*'.match(pattern), 'italic function must match')
+})
+
+test('malformed request URLs return 400 without terminating the web server', async t => {
+  const { url } = await web(t)
+  const response = await new Promise((resolve, reject) => {
+    get(url, { path: 'http://[' }, res => { res.resume(); resolve(res.statusCode) }).on('error', reject)
+  })
+  assert.equal(response, 400)
+  assert.equal((await fetch(url + '/api/status')).status, 200)
+})
+
+test('API-key logout cancels gateway inference and disables every gateway protocol', async t => {
+  let invoked = 0
+  let cancelled
+  const stopped = new Promise(resolve => { cancelled = resolve })
+  const { url, status, post } = await web(t, {
+    async *stream(input) {
+      invoked++
+      yield { type: 'text-delta', index: 0, text: 'Started' }
+      await new Promise(resolve => {
+        const stop = () => { cancelled(); resolve() }
+        if (input.signal.aborted) stop()
+        else input.signal.addEventListener('abort', stop, { once: true })
+      })
+    },
+  }, { authMode: 'api-key', apiKey: 'fake-test-api-key' })
+  const call = (path, body) => fetch(url + path, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  })
+  const body = { model: 'claude-test', messages: [{ role: 'user', content: 'Hi' }] }
+  const active = await call('/v1/chat/completions', { ...body, stream: true })
+  const reader = active.body.getReader()
+  await reader.read()
+  const logout = await fetch(url + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-frontier-token': status.csrf },
+    body: JSON.stringify({ provider: 'claude' }),
+  })
+  assert.equal(logout.status, 200)
+  await logout.text()
+  await Promise.race([
+    stopped,
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Gateway inference was not cancelled')), 1500); timer.unref() }),
+  ])
+  await reader.cancel()
+  assert.equal((await (await fetch(url + '/api/status')).json()).connected, false)
+  assert.equal((await (await fetch(url + '/health')).json()).providers.claude.connected, false)
+  assert.equal((await post(prompt)).status, 401)
+  for (const [path, input] of [
+    ['/v1/chat/completions', body],
+    ['/v1/messages', { ...body, max_tokens: 10 }],
+    ['/v1/responses', { model: 'claude-test', input: 'Hi' }],
+  ]) {
+    const response = await call(path, input)
+    assert.equal(response.status, 401, path)
+    await response.text()
+  }
+  assert.equal(invoked, 1)
 })

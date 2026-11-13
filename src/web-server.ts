@@ -116,6 +116,8 @@ export async function startWebServer(options: WebOptions = {}) {
       localOrigin: origin,
       gatewayKey: options.gatewayKey,
       allowCorsOrigins: options.allowCorsOrigins,
+      isConnected: connected,
+      streams,
     })) {
       return
     }
@@ -189,9 +191,9 @@ export async function startWebServer(options: WebOptions = {}) {
           const job = logins.get(provider); logins.delete(provider); job?.attempt?.cancel()
           if (path === '/api/auth/cancel' && job && ['starting', 'waiting'].includes(job.state)) await target.clear()
           if (path === '/api/auth/logout') {
-            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
             // Persist disabling for API-key mode without modifying environment secrets.
             await atomicPrivateWrite(`${target.path}.web-disabled`, true)
+            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
             await target.clear()
             if (provider === 'openai' && openai instanceof OpenAIAdapter) openai.invalidate()
           }

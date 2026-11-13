@@ -51,6 +51,12 @@ npm start -- serve --port 4317 --gateway-key my-local-secret
 | `POST /v1/responses` | OpenAI Responses (JSON & SSE) | OpenAI Responses API clients |
 | `POST /v1/messages` | Anthropic Messages (JSON & SSE) | Anthropic SDK & Claude-compatible clients |
 
+Responses streaming emits content, reasoning-summary, and function-call lifecycle events for OpenAI SDK stream accumulation. When generation reaches its output-token limit, both JSON and SSE responses report `status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"`.
+
+### Tool selection
+
+OpenAI Chat Completions and Responses requests support `tool_choice: "auto"` (the default) and `tool_choice: "none"`. Anthropic Messages requests use `{ "type": "auto" }` or `{ "type": "none" }`. Selecting `none` removes tool definitions before invoking the provider. Required/forced tool choices, named tool choices, and additional Anthropic tool-choice options return `400`; these restrictions are never silently discarded.
+
 ### Model Routing Rules
 
 - Prefix explicitly with `claude/<model-id>` or `openai/<model-id>` (or pass header `x-frontier-provider: claude|openai`).
@@ -65,6 +71,8 @@ npm run web
 ```
 
 Open **http://127.0.0.1:4317**.
+
+Logging out a provider disables both Web UI chat and the embedded gateway for that provider, including API-key mode, and cancels its active requests. Reconnect in the Web UI to enable it again. This does not revoke credentials in official provider apps or modify an API key in your environment.
 
 ## CLI Reference
 

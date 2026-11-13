@@ -2,6 +2,9 @@
 
 ## 0.2.0 (Unreleased)
 
+- Reject malformed gateway request URLs without terminating the server and support IPv6 loopback URL construction.
+- Apply Web UI logout state and request cancellation to the embedded gateway, including API-key mode.
+- Emit SDK-compatible Responses lifecycle events and incomplete status at output-token limits; enforce supported tool choices and reject unsupported restrictions.
 - **Breaking:** Removed DeepSeek Harness (`@deepseek-ai/dsh-*`, `@deepseek-ai/cordis`) middleware, Cordis plugin patches, and sandboxed subprocess runtime; `frontier-connector` now has zero runtime npm dependencies.
 - Added standalone OpenAI/Anthropic-compatible HTTP API gateway (`frontier serve`, `startGatewayServer`) exposing `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, and `/health` so any external app or SDK can connect directly to Claude and OpenAI subscriptions.
 - Added unified `FrontierConnector` programmatic client (`src/connector.ts`) with model prefix routing (`claude/`, `openai/`), automatic provider inference, and direct `generate()` / `stream()` methods.

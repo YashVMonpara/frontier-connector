@@ -10,5 +10,7 @@ Please use GitHub's private vulnerability reporting feature if it is enabled on 
 - **DNS Rebinding & CSRF Protection**: Both the Web UI and `/v1/*` API gateway validate `Host` headers strictly against the bound host and port. Web UI endpoints (`/api/*`) require a per-process random CSRF token (`x-frontier-token`) and matching same-origin headers.
 - **Cross-Origin Browser Blocking**: Requests to `/v1/*` carrying a cross-site `Origin` header are rejected (`403`) unless explicitly configured via `allowCorsOrigins`.
 - **Optional Gateway Authentication**: Passing `--gateway-key` or `FRONTIER_GATEWAY_KEY` enforces `Authorization: Bearer <key>` or `x-api-key: <key>` checks (constant-time `timingSafeEqual`) across all `/v1/*` endpoints.
+- **Request URL Validation**: Malformed request URLs return `400` without terminating the server; IPv6 loopback authorities are bracketed when constructing URLs.
+- **Web Logout Isolation**: Web UI logout also disables the embedded gateway and cancels active requests for that provider, including API-key mode.
 - **No Credential Echoing**: Auth, OAuth, HTTP, and Web status endpoints never leak tokens or upstream secret payloads.
 - **Browser Local Storage**: Web UI conversation history stays in browser local storage (`frontier.connector.v1`). Logout removes Frontier's local session without revoking provider tokens in official apps.

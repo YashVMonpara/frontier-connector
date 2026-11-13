@@ -18,7 +18,7 @@ import {
   toOpenAIUsage,
 } from './http/gateway-translate.js'
 import { LlmError } from './types.js'
-import type { ConnectorAdapter, ProviderId, StreamChunk, TokenUsage } from './types.js'
+import type { ConnectorAdapter, FinishReason, ProviderId, StreamChunk, TokenUsage } from './types.js'
 
 export interface GatewayOptions {
   port?: number
@@ -36,6 +36,11 @@ const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 
 function isLoopbackAddress(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
+}
+
+function hostAuthority(host: string, port: number): string {
+  const hostname = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `${hostname}:${port}`
 }
 
 function isAllowedHostHeader(hostHeader: string | undefined, boundHost: string, boundPort: number): boolean {
@@ -154,6 +159,9 @@ export interface GatewayContext {
   gatewayKey?: string
   allowCorsOrigins?: readonly string[]
   maxBodyBytes?: number
+  /** Embedded servers can share their connection policy and logout cancellation. */
+  isConnected?: (provider: ProviderId) => Promise<boolean>
+  streams?: Map<AbortController, ProviderId>
 }
 
 /**
@@ -165,7 +173,13 @@ export async function handleGatewayRequest(
   res: ServerResponse,
   ctx: GatewayContext,
 ): Promise<boolean> {
-  const url = new URL(req.url ?? '/', `http://${ctx.boundHost}:${ctx.boundPort}`)
+  let url: URL
+  try {
+    url = new URL(req.url ?? '/', `http://${hostAuthority(ctx.boundHost, ctx.boundPort)}`)
+  } catch {
+    writeJson(res, 400, openAIErrorPayload(new RequestError('Invalid request URL.')))
+    return true
+  }
   const path = url.pathname
   const isGatewayPath = path === '/health' || path === '/v1/health' || path === '/v1/models' ||
     path.startsWith('/v1/models/') || path === '/v1/chat/completions' || path === '/v1/messages' || path === '/v1/responses'
@@ -217,6 +231,11 @@ export async function handleGatewayRequest(
   try {
     if (req.method === 'GET' && (path === '/health' || path === '/v1/health')) {
       const status = await ctx.connector.status()
+      if (ctx.isConnected) {
+        for (const provider of ['claude', 'openai'] as const) {
+          status[provider].connected = await ctx.isConnected(provider)
+        }
+      }
       writeJson(res, 200, { ok: true, providers: status })
       return true
     }
@@ -269,15 +288,17 @@ export async function handleGatewayRequest(
         : parseResponsesRequest(body, explicit)
 
     const target = ctx.connector.resolveTarget(parsed.options.model, parsed.provider)
-    if (!await ctx.connector.isConnected(target.provider)) {
-      throw new RequestError(`Provider '${target.provider}' is not connected. Run frontier auth login --provider ${target.provider}.`, 401)
-    }
-
     const abort = new AbortController()
     const onDisconnect = () => abort.abort(new Error('Client disconnected.'))
     res.once('close', onDisconnect)
+    ctx.streams?.set(abort, target.provider)
 
     try {
+      const connected = await (ctx.isConnected ? ctx.isConnected(target.provider) : ctx.connector.isConnected(target.provider))
+      if (!connected) {
+        throw new RequestError(`Provider '${target.provider}' is not connected. Run frontier auth login --provider ${target.provider}.`, 401)
+      }
+      abort.signal.throwIfAborted()
       const stream = ctx.connector.stream({ ...parsed.options, provider: target.provider, model: target.model, signal: abort.signal })
 
       if (!parsed.stream) {
@@ -357,7 +378,7 @@ export async function handleGatewayRequest(
           id: `resp_${randomUUID()}`,
           object: 'response',
           created_at: Math.floor(Date.now() / 1000),
-          status: 'completed',
+          ...responsesCompletion(result.finishReason),
           model: target.model,
           output,
           output_text: result.text,
@@ -382,6 +403,7 @@ export async function handleGatewayRequest(
       }
       return true
     } finally {
+      ctx.streams?.delete(abort)
       res.off('close', onDisconnect)
     }
   } catch (error) {
@@ -586,96 +608,135 @@ async function streamAnthropicMessages(
   res.end()
 }
 
+function responsesCompletion(reason: FinishReason) {
+  if (reason.kind === 'aborted') throw new LlmError('Generation aborted.', 'STREAM_CLOSED')
+  return reason.kind === 'max-tokens'
+    ? { status: 'incomplete' as const, incomplete_details: { reason: 'max_output_tokens' } }
+    : { status: 'completed' as const, incomplete_details: null }
+}
+
 async function streamResponsesApi(
   res: ServerResponse,
   stream: AsyncIterable<StreamChunk>,
   model: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const responseId = `resp_${randomUUID()}`
+  const responseId = 'resp_' + randomUUID()
+  const createdAt = Math.floor(Date.now() / 1000)
   let headersWritten = false
   let created = false
-  const itemIds = new Map<number, string>()
-  const startedTools = new Set<number>()
+  let sequence = 0
+  const blocks = new Map<number, { id: string; outputIndex: number }>()
   const output: Record<string, unknown>[] = []
   let lastUsage: TokenUsage | undefined
+  let finishReason: FinishReason = { kind: 'stop' }
 
   const sendEvent = async (payload: Record<string, unknown>) => {
     if (!headersWritten) { sseHeaders(res); headersWritten = true }
-    await writeSse(res, `data: ${JSON.stringify(payload)}\n\n`, signal)
+    const event = { ...payload, sequence_number: sequence++ }
+    await writeSse(res, 'event: ' + payload.type + '\ndata: ' + JSON.stringify(event) + '\n\n', signal)
   }
 
   const ensureCreated = async () => {
     if (created) return
     created = true
-    await sendEvent({ type: 'response.created', response: { id: responseId, object: 'response', status: 'in_progress', model } })
+    const response = { id: responseId, object: 'response', created_at: createdAt, status: 'in_progress', model, output: [], error: null, incomplete_details: null }
+    await sendEvent({ type: 'response.created', response })
+    await sendEvent({ type: 'response.in_progress', response })
+  }
+
+  const ensureBlock = async (
+    index: number,
+    kind: 'text' | 'reasoning' | 'tool-call',
+    tool?: { id: string; name?: string },
+  ) => {
+    const existing = blocks.get(index)
+    if (existing) return existing
+    await ensureCreated()
+    const prefix = kind === 'text' ? 'msg_' : kind === 'reasoning' ? 'rs_' : 'fc_'
+    const block = { id: prefix + randomUUID(), outputIndex: blocks.size }
+    blocks.set(index, block)
+    const item = kind === 'text'
+      ? { id: block.id, type: 'message', role: 'assistant', status: 'in_progress', content: [] }
+      : kind === 'reasoning'
+        ? { id: block.id, type: 'reasoning', summary: [] }
+        : { id: block.id, type: 'function_call', status: 'in_progress', call_id: tool!.id, name: tool!.name ?? '', arguments: '' }
+    await sendEvent({ type: 'response.output_item.added', output_index: block.outputIndex, item })
+    if (kind === 'text') {
+      await sendEvent({
+        type: 'response.content_part.added', item_id: block.id, output_index: block.outputIndex,
+        content_index: 0, part: { type: 'output_text', text: '', annotations: [], logprobs: [] },
+      })
+    } else if (kind === 'reasoning') {
+      await sendEvent({
+        type: 'response.reasoning_summary_part.added', item_id: block.id, output_index: block.outputIndex,
+        summary_index: 0, part: { type: 'summary_text', text: '' },
+      })
+    }
+    return block
   }
 
   for await (const chunk of stream) {
     if (chunk.type === 'block-start') {
-      await ensureCreated()
-      const itemId = `item_${chunk.index}_${randomUUID().slice(0, 8)}`
-      itemIds.set(chunk.index, itemId)
-      if (chunk.blockType === 'text') {
-        await sendEvent({ type: 'response.output_item.added', output_index: chunk.index, item: { id: itemId, type: 'message', role: 'assistant', content: [] } })
-      } else if (chunk.blockType === 'reasoning') {
-        await sendEvent({ type: 'response.output_item.added', output_index: chunk.index, item: { id: itemId, type: 'reasoning', summary: [] } })
-      }
-    } else if (chunk.type === 'text-delta') {
-      await ensureCreated()
-      const itemId = itemIds.get(chunk.index) ?? `item_${chunk.index}`
-      await sendEvent({ type: 'response.output_text.delta', item_id: itemId, output_index: chunk.index, content_index: 0, delta: chunk.text })
-    } else if (chunk.type === 'reasoning-delta') {
-      await ensureCreated()
-      const itemId = itemIds.get(chunk.index) ?? `item_${chunk.index}`
-      await sendEvent({ type: 'response.reasoning_summary_text.delta', item_id: itemId, output_index: chunk.index, summary_index: 0, delta: chunk.text })
+      // Tool identity arrives with its first delta or completed block.
+      if (chunk.blockType !== 'tool-call') await ensureBlock(chunk.index, chunk.blockType)
+    } else if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+      const text = chunk.type === 'text-delta'
+      const block = await ensureBlock(chunk.index, text ? 'text' : 'reasoning')
+      await sendEvent({
+        type: text ? 'response.output_text.delta' : 'response.reasoning_summary_text.delta',
+        item_id: block.id, output_index: block.outputIndex,
+        ...(text ? { content_index: 0, logprobs: [] } : { summary_index: 0 }),
+        delta: chunk.text,
+      })
     } else if (chunk.type === 'tool-call-delta') {
-      await ensureCreated()
-      let itemId = itemIds.get(chunk.index)
-      if (!itemId) {
-        itemId = `fc_${chunk.index}_${randomUUID().slice(0, 8)}`
-        itemIds.set(chunk.index, itemId)
-      }
-      if (!startedTools.has(chunk.index)) {
-        startedTools.add(chunk.index)
+      const block = await ensureBlock(chunk.index, 'tool-call', chunk)
+      if (chunk.argumentsDelta) {
         await sendEvent({
-          type: 'response.output_item.added',
-          output_index: chunk.index,
-          item: { id: itemId, type: 'function_call', call_id: chunk.id, name: chunk.name ?? '', arguments: '' },
+          type: 'response.function_call_arguments.delta', item_id: block.id,
+          output_index: block.outputIndex, delta: chunk.argumentsDelta,
         })
       }
-      if (chunk.argumentsDelta) {
-        await sendEvent({ type: 'response.function_call_arguments.delta', item_id: itemId, output_index: chunk.index, delta: chunk.argumentsDelta })
-      }
     } else if (chunk.type === 'block-end') {
-      await ensureCreated()
-      const itemId = itemIds.get(chunk.index) ?? `item_${chunk.index}`
+      const content = chunk.block
+      if (content.type !== 'text' && content.type !== 'reasoning' && content.type !== 'tool-call') continue
+      const block = await ensureBlock(chunk.index, content.type, content.type === 'tool-call' ? content : undefined)
+      const location = { item_id: block.id, output_index: block.outputIndex }
       let item: Record<string, unknown>
-      if (chunk.block.type === 'text') {
-        item = { id: itemId, type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: chunk.block.text }] }
-      } else if (chunk.block.type === 'reasoning') {
-        item = { id: itemId, type: 'reasoning', status: 'completed', summary: [{ type: 'summary_text', text: chunk.block.text }] }
-      } else if (chunk.block.type === 'tool-call') {
-        item = { id: itemId, type: 'function_call', call_id: chunk.block.id, name: chunk.block.name, arguments: chunk.block.arguments, status: 'completed' }
+      if (content.type === 'text') {
+        const part = { type: 'output_text', text: content.text, annotations: [], logprobs: [] }
+        await sendEvent({ type: 'response.output_text.done', ...location, content_index: 0, text: content.text, logprobs: [] })
+        await sendEvent({ type: 'response.content_part.done', ...location, content_index: 0, part })
+        item = { id: block.id, type: 'message', role: 'assistant', status: 'completed', content: [part] }
+      } else if (content.type === 'reasoning') {
+        const part = { type: 'summary_text', text: content.text }
+        await sendEvent({ type: 'response.reasoning_summary_text.done', ...location, summary_index: 0, text: content.text })
+        await sendEvent({ type: 'response.reasoning_summary_part.done', ...location, summary_index: 0, part })
+        item = { id: block.id, type: 'reasoning', summary: [part] }
       } else {
-        continue
+        await sendEvent({ type: 'response.function_call_arguments.done', ...location, name: content.name, arguments: content.arguments })
+        item = { id: block.id, type: 'function_call', call_id: content.id, name: content.name, arguments: content.arguments, status: 'completed' }
       }
-      output.push(item)
-      await sendEvent({ type: 'response.output_item.done', output_index: chunk.index, item })
+      output[block.outputIndex] = item
+      await sendEvent({ type: 'response.output_item.done', output_index: block.outputIndex, item })
     } else if (chunk.type === 'usage') {
       lastUsage = chunk.usage
-    } else if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
-      throw new LlmError(chunk.reason.failure.message, chunk.reason.failure.code ?? 'SERVER')
+    } else if (chunk.type === 'finish') {
+      if (chunk.reason.kind === 'error') throw new LlmError(chunk.reason.failure.message, chunk.reason.failure.code ?? 'SERVER')
+      finishReason = chunk.reason
     }
   }
 
   await ensureCreated()
+  const completion = responsesCompletion(finishReason)
   await sendEvent({
-    type: 'response.completed',
+    type: completion.status === 'incomplete' ? 'response.incomplete' : 'response.completed',
     response: {
       id: responseId,
       object: 'response',
-      status: 'completed',
+      created_at: createdAt,
+      ...completion,
+      error: null,
       model,
       output,
       ...(lastUsage ? {
@@ -731,6 +792,5 @@ export async function startGatewayServer(options: GatewayOptions = {}): Promise<
     })
   })
   boundPort = (server.address() as AddressInfo).port
-  const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return { server, url: `http://${displayHost}:${boundPort}`, connector }
+  return { server, url: `http://${hostAuthority(host, boundPort)}`, connector }
 }
