@@ -314,14 +314,13 @@ export async function handleGatewayRequest(
         : parseResponsesRequest(body, explicit)
 
     const target = ctx.connector.resolveTarget(parsed.options.model, parsed.provider)
-    if (!await isConnected(target.provider)) {
-      throw new RequestError(`Provider '${target.provider}' is not connected. Run frontier auth login --provider ${target.provider}.`, 401)
-    }
     const limiter = ctx.limiter
     if (limiter && limiter.active >= limiter.max) {
       throw new RequestError(`${limiter.max} gateway requests are already running. Retry shortly.`, 429)
     }
 
+    // Register before any await so a disconnect or logout during the
+    // connection check still cancels the request.
     const abort = new AbortController()
     const onDisconnect = () => abort.abort(new Error('Client disconnected.'))
     res.once('close', onDisconnect)
@@ -329,6 +328,10 @@ export async function handleGatewayRequest(
     if (limiter) limiter.active++
 
     try {
+      if (!await isConnected(target.provider)) {
+        throw new RequestError(`Provider '${target.provider}' is not connected. Run frontier auth login --provider ${target.provider}.`, 401)
+      }
+      abort.signal.throwIfAborted()
       // The target is already resolved: call the adapter directly so a model
       // like `openai/claude-x` is not re-parsed and routed to another provider.
       const stream = ctx.connector.adapter(target.provider).stream({

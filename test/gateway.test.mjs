@@ -561,3 +561,46 @@ test('all gateway protocols enforce none and reject unsupported tool selection b
     }
   }
 })
+
+test('logout during the connection check cancels the request before any provider call', async t => {
+  const { FrontierConnector } = await import('../dist/connector.js')
+  const { handleGatewayRequest } = await import('../dist/gateway.js')
+  const { createServer } = await import('node:http')
+  const { store } = await fixture(t)
+  let invoked = 0
+  const adapter = {
+    listModels: async p => [{ provider: p, id: 'claude-test', name: 'Test' }],
+    resolveModel: async (p, id) => ({ provider: p, id, name: id }),
+    usage: async () => ({}),
+    async *stream() { invoked++; yield { type: 'finish', reason: { kind: 'stop' } } },
+  }
+  const connector = new FrontierConnector({ config: { authFile: store.path }, claude: adapter, openai: adapter })
+  const streams = new Map()
+  const limiter = { active: 0, max: 8 }
+  let checking
+  const checked = new Promise(resolve => { checking = resolve })
+  const server = createServer((req, res) => {
+    const { port } = server.address()
+    void handleGatewayRequest(req, res, {
+      connector, boundHost: '127.0.0.1', boundPort: port, streams, limiter,
+      // Simulate a logout landing while the connection check is pending.
+      isConnected: async provider => {
+        for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
+        checking()
+        return true
+      },
+    })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude/claude-test', messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  await checked
+  await response.text()
+  assert.notEqual(response.status, 200)
+  assert.equal(invoked, 0, 'a cancelled request must not reach the provider')
+  assert.equal(streams.size, 0)
+  assert.equal(limiter.active, 0)
+})
