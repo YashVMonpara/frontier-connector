@@ -1,3 +1,4 @@
+import { LlmError } from '../types.js'
 import { TokenStore, defaultAuthPath } from './store.js'
 import type { ClaudeSession } from './store.js'
 import { beginOAuthLogin } from './oauth.js'
@@ -45,7 +46,7 @@ export class OpenAITokens {
   async session(rejected?: string): Promise<ClaudeSession> {
     return this.store.locked(async () => {
       const current = await this.store.read()
-      if (!current?.accountId) throw new Error('Connect OpenAI in settings to continue.')
+      if (!current?.accountId) throw new LlmError('Connect OpenAI in settings to continue.', 'AUTH')
       if (current.accessToken !== rejected && current.expiresAt > Date.now() + 300_000) return current
       const next = await openaiGrant({ grant_type: 'refresh_token', refresh_token: current.refreshToken }, this.fetchFn, current)
       await this.store.write(next)

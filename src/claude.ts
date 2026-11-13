@@ -119,7 +119,7 @@ export class ClaudeAdapter implements ConnectorAdapter {
       headers.set('anthropic-dangerous-direct-browser-access', 'true')
     } else {
       const key = this.config.apiKey ?? process.env.ANTHROPIC_API_KEY
-      if (!key) throw new Error('Set ANTHROPIC_API_KEY for API-key mode.')
+      if (!key) throw new LlmError('Set ANTHROPIC_API_KEY for API-key mode.', 'AUTH')
       headers.set('x-api-key', key)
       headers.set('user-agent', 'frontier-connector/0.2.0')
     }

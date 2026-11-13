@@ -1,3 +1,4 @@
+import { LlmError } from '../types.js'
 import { TokenStore } from './store.js'
 import type { ClaudeSession } from './store.js'
 import { refreshSession } from './oauth.js'
@@ -10,7 +11,7 @@ export class TokenManager {
   async session(rejectedAccessToken?: string): Promise<ClaudeSession> {
     return this.store.locked(async () => {
       let current = await this.store.read()
-      if (!current) throw new Error('No Claude session. Run frontier auth login or frontier auth import.')
+      if (!current) throw new LlmError('No Claude session. Run frontier auth login or frontier auth import.', 'AUTH')
       if (current.source) {
         const source = await readSource(current.source)
         if (source.accessToken !== current.accessToken || source.refreshToken !== current.refreshToken) {
@@ -22,7 +23,7 @@ export class TokenManager {
       if (!rejected && current.expiresAt > Date.now() + 5 * 60_000) return current
       if (current.source?.kind === 'keychain') {
         if (!rejected && current.expiresAt > Date.now() + 30_000) return current
-        throw new Error('Refresh your imported session by running Claude Code, then retry. Use auth login for independent automatic refresh.')
+        throw new LlmError('Refresh your imported session by running Claude Code, then retry. Use auth login for independent automatic refresh.', 'AUTH')
       }
       const next = await refreshSession(current, this.fetchFn)
       // Persist the rotated token first, even if syncing back to the source fails.

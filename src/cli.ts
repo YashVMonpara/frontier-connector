@@ -39,7 +39,9 @@ Options:
   --json              Emit stream chunks as newline-delimited JSON
   --port N            Server port (default 4317)
   --host HOST         Server bind host for serve (default 127.0.0.1)
-  --gateway-key KEY   Optional Bearer / x-api-key required by /v1/* gateway endpoints
+  --gateway-key KEY   Bearer / x-api-key required by /v1/* endpoints. Prefer the
+                      FRONTIER_GATEWAY_KEY env var: flags are visible in ps and
+                      shell history. Required when --host is not loopback.
   --help              Show this help
 
 OAuth login prints a browser URL and accepts a full callback URL as fallback.

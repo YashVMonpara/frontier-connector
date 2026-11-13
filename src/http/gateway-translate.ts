@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { RequestError } from './chat.js'
+import { LlmError } from '../types.js'
 import type {
   ContentBlock,
   FinishReason,
@@ -25,6 +26,19 @@ function validateModel(model: unknown): string {
   }
   return model
 }
+
+/** Rejects out-of-range sampling parameters instead of forwarding them to a provider. */
+function optionalNumber(value: unknown, name: string, min: number, max: number, integer = false): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+    throw new RequestError(`${name} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}.`)
+  }
+  return value
+}
+
+const MAX_OUTPUT_TOKENS = 200_000
+const maxTokensOf = (value: unknown, name: string) => optionalNumber(value, name, 1, MAX_OUTPUT_TOKENS, true)
+const temperatureOf = (value: unknown) => optionalNumber(value, 'temperature', 0, 2)
 
 function textFromParts(value: unknown): string {
   if (typeof value === 'string') return value
@@ -136,9 +150,8 @@ export function parseOpenAIChatRequest(body: unknown, explicitProvider?: Provide
     })
   }
 
-  const maxTokensRaw = req.max_completion_tokens ?? req.max_tokens
-  const maxTokens = typeof maxTokensRaw === 'number' ? maxTokensRaw : undefined
-  const temperature = typeof req.temperature === 'number' ? req.temperature : undefined
+  const maxTokens = maxTokensOf(req.max_completion_tokens ?? req.max_tokens, 'max_tokens')
+  const temperature = temperatureOf(req.temperature)
   const reasoningEffort = typeof req.reasoning_effort === 'string' && req.reasoning_effort ? req.reasoning_effort : undefined
   const stop = typeof req.stop === 'string' ? [req.stop] : Array.isArray(req.stop) ? req.stop.filter((s): s is string => typeof s === 'string') : undefined
   const streamOptions = req.stream_options && typeof req.stream_options === 'object' ? req.stream_options as Record<string, unknown> : undefined
@@ -241,8 +254,8 @@ export function parseAnthropicMessagesRequest(body: unknown, explicitProvider?: 
 
   const outputConfig = req.output_config && typeof req.output_config === 'object' ? req.output_config as Record<string, unknown> : undefined
   const reasoningEffort = typeof outputConfig?.effort === 'string' ? outputConfig.effort : undefined
-  const maxTokens = typeof req.max_tokens === 'number' ? req.max_tokens : 4096
-  const temperature = typeof req.temperature === 'number' ? req.temperature : undefined
+  const maxTokens = maxTokensOf(req.max_tokens, 'max_tokens') ?? 4096
+  const temperature = temperatureOf(req.temperature)
   const stop = Array.isArray(req.stop_sequences) ? req.stop_sequences.filter((s): s is string => typeof s === 'string') : undefined
 
   return {
@@ -327,8 +340,8 @@ export function parseResponsesRequest(body: unknown, explicitProvider?: Provider
 
   const reasoning = req.reasoning && typeof req.reasoning === 'object' ? req.reasoning as Record<string, unknown> : undefined
   const reasoningEffort = typeof reasoning?.effort === 'string' ? reasoning.effort : undefined
-  const maxTokens = typeof req.max_output_tokens === 'number' ? req.max_output_tokens : undefined
-  const temperature = typeof req.temperature === 'number' ? req.temperature : undefined
+  const maxTokens = maxTokensOf(req.max_output_tokens, 'max_output_tokens')
+  const temperature = temperatureOf(req.temperature)
 
   return {
     provider: explicitProvider,
@@ -381,14 +394,25 @@ export function toAnthropicUsage(usage: TokenUsage) {
   }
 }
 
-export function openAIErrorPayload(error: unknown) {
-  const message = error instanceof Error ? error.message : 'Request failed.'
-  return { error: { message, type: 'invalid_request_error', code: null } }
+/** Error `type` per HTTP status, so SDK retry logic sees auth, rate-limit, and server failures as such. */
+function errorType(status: number): string {
+  if (status === 401) return 'authentication_error'
+  if (status === 403) return 'permission_error'
+  if (status === 404) return 'not_found_error'
+  if (status === 413) return 'request_too_large'
+  if (status === 429) return 'rate_limit_error'
+  if (status >= 500) return 'api_error'
+  return 'invalid_request_error'
 }
 
-export function anthropicErrorPayload(error: unknown) {
+export function openAIErrorPayload(error: unknown, status = 400) {
   const message = error instanceof Error ? error.message : 'Request failed.'
-  return { type: 'error', error: { type: 'invalid_request_error', message } }
+  return { error: { message, type: errorType(status), code: null } }
+}
+
+export function anthropicErrorPayload(error: unknown, status = 400) {
+  const message = error instanceof Error ? error.message : 'Request failed.'
+  return { type: 'error', error: { type: errorType(status), message } }
 }
 
 export async function collectFullResponse(stream: AsyncIterable<StreamChunk>) {
@@ -404,7 +428,7 @@ export async function collectFullResponse(stream: AsyncIterable<StreamChunk>) {
     else if (chunk.type === 'usage') usage = chunk.usage
     else if (chunk.type === 'finish') {
       finishReason = chunk.reason
-      if (chunk.reason.kind === 'error') throw new Error(chunk.reason.failure.message)
+      if (chunk.reason.kind === 'error') throw new LlmError(chunk.reason.failure.message, chunk.reason.failure.code ?? 'SERVER')
     }
   }
   return { text, reasoning, toolCalls, usage, finishReason }

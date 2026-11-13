@@ -17,7 +17,7 @@ import { beginOpenAILogin, openaiStore } from './auth/openai.js'
 import { OpenAIAdapter } from './openai.js'
 import type { OpenAIOptions } from './openai.js'
 import { FrontierConnector } from './connector.js'
-import { handleGatewayRequest } from './gateway.js'
+import { assertSafeExposure, failSafe, handleGatewayRequest } from './gateway.js'
 
 interface LoginJob { state: 'starting' | 'waiting' | 'connected' | 'error'; attempt?: LoginAttempt; error?: string }
 
@@ -29,6 +29,8 @@ export interface WebOptions {
   loginFactory?: (provider: Provider) => Promise<LoginAttempt>
   gatewayKey?: string
   allowCorsOrigins?: readonly string[]
+  /** Maximum simultaneous `/v1/*` inference requests (default 8). */
+  maxGatewayRequests?: number
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -65,6 +67,10 @@ async function send(res: ServerResponse, value: unknown, signal: AbortSignal) {
 export async function startWebServer(options: WebOptions = {}) {
   const port = options.port ?? 4317
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Port must be between 0 and 65535.')
+  const gatewayKey = options.gatewayKey ?? process.env.FRONTIER_GATEWAY_KEY
+  assertSafeExposure('127.0.0.1', gatewayKey, options.allowCorsOrigins)
+  const gatewayLimiter = { active: 0, max: options.maxGatewayRequests ?? 8 }
+  if (!Number.isInteger(gatewayLimiter.max) || gatewayLimiter.max < 1) throw new Error('maxGatewayRequests must be a positive integer.')
   const config = options.config ?? {}
   const adapter = options.adapter ?? new ClaudeAdapter(config)
   const store = new TokenStore(config.authFile)
@@ -107,15 +113,21 @@ export async function startWebServer(options: WebOptions = {}) {
   let origin = ''
   let boundPort = port
   let active = 0
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => { void handle(req, res).catch(error => failSafe(res, error)) })
+  const handle = async (req: IncomingMessage, res: ServerResponse) => {
     // Allow external apps to call /health and /v1/* directly on the same server.
+    // The gateway shares the UI's readiness check and stream registry, so a UI
+    // logout also disables and cancels gateway traffic for that provider.
     if (await handleGatewayRequest(req, res, {
       connector,
       boundHost: '127.0.0.1',
       boundPort,
       localOrigin: origin,
-      gatewayKey: options.gatewayKey,
+      gatewayKey,
       allowCorsOrigins: options.allowCorsOrigins,
+      isConnected: connected,
+      streams,
+      limiter: gatewayLimiter,
     })) {
       return
     }
@@ -169,7 +181,7 @@ export async function startWebServer(options: WebOptions = {}) {
               responses: `${origin}/v1/responses`,
               models: `${origin}/v1/models`,
             },
-            authRequired: Boolean(options.gatewayKey ?? process.env.FRONTIER_GATEWAY_KEY),
+            authRequired: Boolean(gatewayKey),
           },
         })
         return
@@ -189,9 +201,10 @@ export async function startWebServer(options: WebOptions = {}) {
           const job = logins.get(provider); logins.delete(provider); job?.attempt?.cancel()
           if (path === '/api/auth/cancel' && job && ['starting', 'waiting'].includes(job.state)) await target.clear()
           if (path === '/api/auth/logout') {
-            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
-            // Persist disabling for API-key mode without modifying environment secrets.
+            // Persist disabling first (API-key mode keeps its environment secret),
+            // so no new UI or gateway request can start after the abort sweep.
             await atomicPrivateWrite(`${target.path}.web-disabled`, true)
+            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
             await target.clear()
             if (provider === 'openai' && openai instanceof OpenAIAdapter) openai.invalidate()
           }
@@ -256,7 +269,7 @@ export async function startWebServer(options: WebOptions = {}) {
       if (!res.destroyed && !res.headersSent) json(res, { error: error instanceof Error ? error.message : 'Request failed.' }, error instanceof RequestError ? error.status : 500)
       else res.end()
     }
-  })
+  }
   server.on('close', () => { for (const job of logins.values()) job.attempt?.cancel(); logins.clear(); for (const controller of streams.keys()) controller.abort() })
   server.requestTimeout = 30_000
   await new Promise<void>((resolve, reject) => {

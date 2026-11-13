@@ -238,3 +238,194 @@ test('gateway rejects requests when provider is not logged in and aborts upstrea
     new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Upstream was not aborted')), 1500); timer.unref() }),
   ])
 })
+
+// --- Regression tests for the gateway security review ---
+
+import { connect } from 'node:net'
+
+function rawRequest(url, requestLine, headers = '') {
+  const { hostname, port } = new URL(url)
+  return new Promise((resolve, reject) => {
+    const socket = connect(Number(port), hostname, () => {
+      socket.write(`${requestLine}\r\nHost: ${hostname}:${port}\r\n${headers}Connection: close\r\n\r\n`)
+    })
+    let data = ''
+    socket.on('data', chunk => { data += chunk })
+    socket.on('end', () => resolve(Number(data.split(' ')[1])))
+    socket.on('error', reject)
+  })
+}
+
+const sseEvents = text => text.split('\n\n').filter(Boolean)
+  .map(block => block.split('\n').find(line => line.startsWith('data: '))?.slice(6))
+  .filter(data => data && data !== '[DONE]').map(data => JSON.parse(data))
+
+test('malformed request URLs and model escapes return 400 without crashing the gateway', async t => {
+  const { url } = await startTestGateway(t)
+  assert.equal(await rawRequest(url, 'GET //[ HTTP/1.1'), 400)
+  assert.equal((await fetch(`${url}/v1/models/%E0`)).status, 400)
+  assert.equal((await fetch(`${url}/health`)).status, 200, 'gateway must still be serving')
+})
+
+test('gateway refuses non-loopback binds and wildcard CORS without a gateway key', async () => {
+  const saved = process.env.FRONTIER_GATEWAY_KEY
+  delete process.env.FRONTIER_GATEWAY_KEY
+  try {
+    await assert.rejects(startGatewayServer({ port: 0, host: '0.0.0.0' }), /without a gateway key/)
+    await assert.rejects(startGatewayServer({ port: 0, allowCorsOrigins: ['*'] }), /without a gateway key/)
+  } finally {
+    if (saved !== undefined) process.env.FRONTIER_GATEWAY_KEY = saved
+  }
+})
+
+test('wildcard binds require the gateway key even with a forged Host header', async t => {
+  const { server } = await startGatewayServer({ port: 0, host: '0.0.0.0', gatewayKey: 'lan-key' })
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const port = server.address().port
+  const status = headers => new Promise((resolve, reject) => {
+    get({ hostname: '127.0.0.1', port, path: '/v1/models', headers: { host: `0.0.0.0:${port}`, ...headers } }, res => {
+      res.resume(); resolve(res.statusCode)
+    }).on('error', reject)
+  })
+  assert.equal(await status({}), 401)
+  assert.equal(await status({ authorization: 'Bearer lan-key' }), 200)
+})
+
+test('a provider-prefixed model is routed once and never re-parsed into another provider', async t => {
+  const { url, calls } = await startTestGateway(t)
+  const res = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'openai/claude/x', messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  assert.equal(res.status, 200)
+  assert.equal(calls[0].provider, 'openai')
+  assert.equal(calls[0].model, 'claude/x')
+})
+
+test('out-of-range sampling parameters are rejected before any provider call', async t => {
+  const { url, calls } = await startTestGateway(t)
+  const send = (path, body) => fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const chat = { model: 'claude-x', messages: [{ role: 'user', content: 'Hi' }] }
+  for (const extra of [{ max_tokens: -1 }, { max_tokens: 1.5 }, { max_tokens: 10_000_000 }, { temperature: 5 }, { temperature: 'hot' }]) {
+    const res = await send('/v1/chat/completions', { ...chat, ...extra })
+    assert.equal(res.status, 400, JSON.stringify(extra))
+    assert.equal((await res.json()).error.type, 'invalid_request_error')
+  }
+  assert.equal((await send('/v1/messages', { ...chat, max_tokens: 0 })).status, 400)
+  assert.equal((await send('/v1/responses', { model: 'claude-x', input: 'Hi', max_output_tokens: -5 })).status, 400)
+  assert.equal(calls.length, 0)
+})
+
+test('gateway caps concurrent inference requests with 429 and frees the slot afterwards', async t => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const { url } = await startTestGateway(t, {
+    gatewayOptions: { maxConcurrentRequests: 1 },
+    async *onStream() {
+      yield { type: 'text-delta', index: 0, text: 'busy' }
+      await gate
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  const send = () => fetch(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', stream: true, messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  const first = await send()
+  const reader = first.body.getReader()
+  await reader.read()
+  const second = await send()
+  assert.equal(second.status, 429)
+  assert.equal((await second.json()).error.type, 'rate_limit_error')
+  release()
+  while (!(await reader.read()).done) { /* drain */ }
+  const third = await send()
+  assert.equal(third.status, 200)
+  await third.text()
+})
+
+test('error payloads carry a type matching the HTTP status', async t => {
+  const { url, oaStore } = await startTestGateway(t, { gatewayOptions: { gatewayKey: 'k' } })
+  const noKey = await fetch(`${url}/v1/messages`, { method: 'POST' })
+  assert.equal(noKey.status, 401)
+  assert.equal((await noKey.json()).error.type, 'authentication_error')
+  await oaStore.clear()
+  const disconnected = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'k' },
+    body: JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  assert.equal(disconnected.status, 401)
+  assert.equal((await disconnected.json()).error.type, 'authentication_error')
+})
+
+test('typed adapter auth errors map to 401 without message matching', async t => {
+  const { LlmError } = await import('../dist/types.js')
+  const { url } = await startTestGateway(t, {
+    async *onStream() { throw new LlmError('Session revoked upstream.', 'AUTH') },
+  })
+  const res = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  assert.equal(res.status, 401)
+  assert.equal((await res.json()).error.type, 'authentication_error')
+})
+
+test('Responses stream follows the spec event sequence with dense output indexes', async t => {
+  const { url } = await startTestGateway(t)
+  const res = await fetch(`${url}/v1/responses`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', stream: true, input: 'Hi', tools: [{ type: 'function', name: 'search', parameters: { type: 'object' } }] }),
+  })
+  const events = sseEvents(await res.text())
+  assert.deepEqual(events.map(e => e.type), [
+    'response.created', 'response.in_progress',
+    'response.output_item.added', 'response.reasoning_summary_part.added', 'response.reasoning_summary_text.delta',
+    'response.reasoning_summary_text.done', 'response.reasoning_summary_part.done', 'response.output_item.done',
+    'response.output_item.added', 'response.content_part.added', 'response.output_text.delta',
+    'response.output_text.done', 'response.content_part.done', 'response.output_item.done',
+    'response.output_item.added', 'response.function_call_arguments.delta',
+    'response.function_call_arguments.done', 'response.output_item.done',
+    'response.completed',
+  ])
+  assert.deepEqual(events.map(e => e.sequence_number), events.map((_, i) => i))
+  assert.deepEqual(events.filter(e => e.type === 'response.output_item.added').map(e => e.output_index), [0, 1, 2])
+  const done = events.at(-1).response
+  assert.deepEqual(done.output.map(item => item.type), ['reasoning', 'message', 'function_call'])
+  assert.equal(done.usage.input_tokens, 18)
+})
+
+test('a mid-stream provider failure ends a Responses stream with response.failed', async t => {
+  const { url } = await startTestGateway(t, {
+    async *onStream() {
+      yield { type: 'text-delta', index: 0, text: 'Partial' }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'Upstream overloaded', code: 'SERVER' } } }
+    },
+  })
+  const res = await fetch(`${url}/v1/responses`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', stream: true, input: 'Hi' }),
+  })
+  const events = sseEvents(await res.text())
+  const last = events.at(-1)
+  assert.equal(last.type, 'response.failed')
+  assert.equal(last.response.status, 'failed')
+  assert.equal(last.response.error.message, 'Upstream overloaded')
+})
+
+test('Anthropic stream opens a content block before deltas even without block-start', async t => {
+  const { url } = await startTestGateway(t, {
+    async *onStream() {
+      yield { type: 'text-delta', index: 0, text: 'Hi' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Hi' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  const res = await fetch(`${url}/v1/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', stream: true, max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+  const types = sseEvents(await res.text()).map(e => e.type)
+  assert.deepEqual(types, ['message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'])
+})

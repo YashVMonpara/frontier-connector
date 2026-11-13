@@ -107,3 +107,55 @@ test('web app markdown pattern matches bold and italic words containing n', asyn
   assert.ok('**new**'.match(pattern), 'bold new must match')
   assert.ok('*function*'.match(pattern), 'italic function must match')
 })
+
+test('web logout in API-key mode disables the embedded gateway and cancels its streams', async t => {
+  const { store } = await fixture(t)
+  let aborted
+  const cancelled = new Promise(resolve => { aborted = resolve })
+  const adapter = {
+    listModels: async () => [{ id: 'claude-x', name: 'X' }],
+    resolveModel: async (_, id) => ({ id, name: id }),
+    usage: async () => ({}),
+    async *stream(input) {
+      yield { type: 'text-delta', index: 0, text: 'working' }
+      await new Promise(resolve => input.signal.addEventListener('abort', () => { aborted(); resolve() }, { once: true }))
+    },
+  }
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path, authMode: 'api-key', apiKey: 'test-key' }, adapter })
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  const gateway = stream => fetch(`${url}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-x', stream, messages: [{ role: 'user', content: 'Hi' }] }),
+  })
+
+  const running = await gateway(true)
+  const reader = running.body.getReader()
+  await reader.read()
+
+  const { csrf } = await (await fetch(`${url}/api/status`)).json()
+  const logout = await fetch(`${url}/api/auth/logout`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': csrf }, body: JSON.stringify({ provider: 'claude' }),
+  })
+  assert.equal(logout.status, 200)
+  await Promise.race([
+    cancelled,
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Gateway stream was not cancelled')), 1500); timer.unref() }),
+  ])
+  await reader.cancel()
+
+  assert.equal((await gateway(false)).status, 401)
+  assert.equal((await (await fetch(`${url}/health`)).json()).providers.claude.connected, false)
+})
+
+test('web server answers malformed request URLs with 400 and keeps running', async t => {
+  const { url } = await web(t)
+  const { hostname, port } = new URL(url)
+  const { connect } = await import('node:net')
+  const status = await new Promise((resolve, reject) => {
+    const socket = connect(Number(port), hostname, () => socket.write(`GET //[ HTTP/1.1\r\nHost: ${hostname}:${port}\r\nConnection: close\r\n\r\n`))
+    let data = ''
+    socket.on('data', chunk => { data += chunk }); socket.on('end', () => resolve(Number(data.split(' ')[1]))); socket.on('error', reject)
+  })
+  assert.equal(status, 400)
+  assert.equal((await fetch(`${url}/api/status`)).status, 200)
+})

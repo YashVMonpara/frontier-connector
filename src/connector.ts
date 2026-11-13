@@ -156,7 +156,8 @@ export class FrontierConnector {
     let usage: TokenUsage | undefined
     let finishReason: FinishReason = { kind: 'stop' }
 
-    for await (const chunk of this.stream({ ...options, provider: target.provider, model: target.model })) {
+    // Use the adapter directly: re-resolving the stripped model could re-route it.
+    for await (const chunk of this.adapter(target.provider).stream({ ...options, provider: target.provider, model: target.model })) {
       if (chunk.type === 'text-delta') text += chunk.text
       else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
       else if (chunk.type === 'block-end') {
