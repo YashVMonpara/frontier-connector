@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { get } from 'node:http'
+import OpenAI from 'openai'
 import { startGatewayServer } from '../dist/gateway.js'
 import { openaiStore } from '../dist/auth/openai.js'
 import { fixture, session } from './helpers.mjs'
@@ -428,4 +429,135 @@ test('Anthropic stream opens a content block before deltas even without block-st
   })
   const types = sseEvents(await res.text()).map(e => e.type)
   assert.deepEqual(types, ['message_start', 'content_block_start', 'content_block_delta', 'content_block_stop', 'message_delta', 'message_stop'])
+})
+
+test('gateway accepts ordinary IPv6 loopback requests and still enforces Host and API keys', async t => {
+  const { store } = await fixture(t)
+  let gateway
+  try {
+    gateway = await startGatewayServer({ port: 0, host: '::1', gatewayKey: 'ipv6-key', config: { authFile: store.path } })
+  } catch (error) {
+    if (['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error.code)) {
+      t.skip('IPv6 loopback is unavailable')
+      return
+    }
+    throw error
+  }
+  const { server, url } = gateway
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
+  assert.equal((await fetch(url + '/health')).status, 401)
+  const response = await fetch(url + '/health', { headers: { 'x-api-key': 'ipv6-key' } })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).ok, true)
+  const forged = await new Promise((resolve, reject) => {
+    get(url + '/health', { headers: { host: 'evil.example', 'x-api-key': 'ipv6-key' } }, res => {
+      res.resume()
+      resolve(res.statusCode)
+    }).on('error', reject)
+  })
+  assert.equal(forged, 403)
+})
+
+test('official Responses SDK accumulates text, reasoning, and tool events', async t => {
+  const { url } = await startTestGateway(t)
+  const sdk = new OpenAI({ baseURL: url + '/v1', apiKey: 'test-placeholder', maxRetries: 0 })
+  const stream = sdk.responses.stream({
+    model: 'claude-sonnet-5',
+    input: 'Hello',
+    tools: [{ type: 'function', name: 'search', parameters: { type: 'object' } }],
+  })
+  const events = []
+  for await (const event of stream) events.push(event)
+  const response = await stream.finalResponse()
+  assert.equal(response.status, 'completed')
+  assert.equal(response.output_text, 'Hello from claude:claude-sonnet-5')
+  assert.equal(response.output[0].summary[0].text, 'Step 1')
+  assert.equal(response.output[2].call_id, 'call_abc')
+  assert.equal(response.output[2].arguments, '{"x":1}')
+  for (const type of [
+    'response.content_part.added', 'response.content_part.done', 'response.output_text.done',
+    'response.reasoning_summary_part.added', 'response.reasoning_summary_part.done',
+    'response.reasoning_summary_text.done', 'response.function_call_arguments.done',
+  ]) assert.ok(events.some(event => event.type === type), type)
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, i) => i))
+})
+
+test('Responses SDK preserves interleaved sparse blocks and tools with no argument deltas', async t => {
+  const { url } = await startTestGateway(t, {
+    async *onStream() {
+      yield { type: 'reasoning-delta', index: 7, text: 'Reason' }
+      yield { type: 'text-delta', index: 3, text: 'Answer' }
+      yield { type: 'block-end', index: 3, block: { type: 'text', text: 'Answer' } }
+      yield { type: 'block-end', index: 7, block: { type: 'reasoning', text: 'Reason' } }
+      yield { type: 'block-end', index: 11, block: { type: 'tool-call', id: 'empty', name: 'ping', arguments: '{}' } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    },
+  })
+  const sdk = new OpenAI({ baseURL: url + '/v1', apiKey: 'test-placeholder', maxRetries: 0 })
+  const response = await sdk.responses.stream({ model: 'claude-test', input: 'Hi' }).finalResponse()
+  assert.deepEqual(response.output.map(item => item.type), ['reasoning', 'message', 'function_call'])
+  assert.equal(response.output_text, 'Answer')
+  assert.equal(response.output[2].arguments, '{}')
+  assert.equal(response.output[2].name, 'ping')
+})
+
+test('Responses SDK receives incomplete status and details when generation reaches its token limit', async t => {
+  const { url } = await startTestGateway(t, {
+    async *onStream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Partial' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Partial' } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    },
+  })
+  const sdk = new OpenAI({ baseURL: url + '/v1', apiKey: 'test-placeholder', maxRetries: 0 })
+  const input = { model: 'claude-test', input: 'Hi', max_output_tokens: 1 }
+  const json = await sdk.responses.create(input)
+  assert.equal(json.status, 'incomplete')
+  assert.deepEqual(json.incomplete_details, { reason: 'max_output_tokens' })
+
+  const stream = sdk.responses.stream(input)
+  const types = []
+  for await (const event of stream) types.push(event.type)
+  const response = await stream.finalResponse()
+  assert.equal(response.status, 'incomplete')
+  assert.deepEqual(response.incomplete_details, { reason: 'max_output_tokens' })
+  assert.ok(types.includes('response.incomplete'))
+  assert.ok(!types.includes('response.completed'))
+})
+
+test('all gateway protocols enforce none and reject unsupported tool selection before provider calls', async t => {
+  const { url, calls } = await startTestGateway(t)
+  const protocols = [
+    {
+      path: '/v1/chat/completions',
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'Hi' }], tools: [{ type: 'function', function: { name: 'ping', parameters: { type: 'object' } } }] },
+      choices: ['none', 'auto', 'required', { type: 'function', function: { name: 'ping' } }, 'invalid'],
+    },
+    {
+      path: '/v1/responses',
+      body: { model: 'claude-test', input: 'Hi', tools: [{ type: 'function', name: 'ping', parameters: { type: 'object' } }] },
+      choices: ['none', 'auto', 'required', { type: 'function', name: 'ping' }, 'invalid'],
+    },
+    {
+      path: '/v1/messages',
+      body: { model: 'claude-test', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }], tools: [{ name: 'ping', input_schema: { type: 'object' } }] },
+      choices: [{ type: 'none' }, { type: 'auto' }, { type: 'any' }, { type: 'tool', name: 'ping' }, { type: 'auto', disable_parallel_tool_use: true }],
+    },
+  ]
+  for (const { path, body, choices } of protocols) {
+    for (const [i, tool_choice] of choices.entries()) {
+      const count = calls.length
+      const response = await fetch(url + path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...body, tool_choice }),
+      })
+      await response.text()
+      assert.equal(response.status, i < 2 ? 200 : 400, path + ' ' + JSON.stringify(tool_choice))
+      if (i === 0) assert.equal(calls.at(-1).tools, undefined)
+      else if (i === 1) assert.equal(calls.at(-1).tools[0].name, 'ping')
+      else assert.equal(calls.length, count, 'unsupported choices must not invoke a provider')
+    }
+  }
 })

@@ -656,6 +656,7 @@ async function streamAnthropicMessages(
 }
 
 function responsesCompletion(reason: FinishReason) {
+  if (reason.kind === 'aborted') throw new LlmError('Generation aborted.', 'STREAM_CLOSED')
   return reason.kind === 'max-tokens'
     ? { status: 'incomplete' as const, incomplete_details: { reason: 'max_output_tokens' } }
     : { status: 'completed' as const, incomplete_details: null }

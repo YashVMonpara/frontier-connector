@@ -4,7 +4,7 @@ import { get } from 'node:http'
 import { startWebServer } from '../dist/web-server.js'
 import { fixture, session } from './helpers.mjs'
 
-async function web(t, overrides = {}) {
+async function web(t, overrides = {}, config = {}) {
   const { store } = await fixture(t)
   await store.save(session())
   const calls = []
@@ -19,7 +19,7 @@ async function web(t, overrides = {}) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     }, ...overrides,
   }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path, ...config }, adapter })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (body, headers = {}) => fetch(`${url}/api/chat`, {
@@ -108,43 +108,53 @@ test('web app markdown pattern matches bold and italic words containing n', asyn
   assert.ok('*function*'.match(pattern), 'italic function must match')
 })
 
-test('web logout in API-key mode disables the embedded gateway and cancels its streams', async t => {
-  const { store } = await fixture(t)
-  let aborted
-  const cancelled = new Promise(resolve => { aborted = resolve })
-  const adapter = {
-    listModels: async () => [{ id: 'claude-x', name: 'X' }],
-    resolveModel: async (_, id) => ({ id, name: id }),
-    usage: async () => ({}),
+test('API-key logout cancels gateway inference and disables every gateway protocol', async t => {
+  let invoked = 0
+  let cancelled
+  const stopped = new Promise(resolve => { cancelled = resolve })
+  const { url, status, post } = await web(t, {
     async *stream(input) {
-      yield { type: 'text-delta', index: 0, text: 'working' }
-      await new Promise(resolve => input.signal.addEventListener('abort', () => { aborted(); resolve() }, { once: true }))
+      invoked++
+      yield { type: 'text-delta', index: 0, text: 'Started' }
+      await new Promise(resolve => {
+        const stop = () => { cancelled(); resolve() }
+        if (input.signal.aborted) stop()
+        else input.signal.addEventListener('abort', stop, { once: true })
+      })
     },
-  }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path, authMode: 'api-key', apiKey: 'test-key' }, adapter })
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
-  const gateway = stream => fetch(`${url}/v1/chat/completions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'claude-x', stream, messages: [{ role: 'user', content: 'Hi' }] }),
+  }, { authMode: 'api-key', apiKey: 'fake-test-api-key' })
+  const call = (path, body) => fetch(url + path, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   })
-
-  const running = await gateway(true)
-  const reader = running.body.getReader()
+  const body = { model: 'claude-test', messages: [{ role: 'user', content: 'Hi' }] }
+  const active = await call('/v1/chat/completions', { ...body, stream: true })
+  const reader = active.body.getReader()
   await reader.read()
-
-  const { csrf } = await (await fetch(`${url}/api/status`)).json()
-  const logout = await fetch(`${url}/api/auth/logout`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': csrf }, body: JSON.stringify({ provider: 'claude' }),
+  const logout = await fetch(url + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-frontier-token': status.csrf },
+    body: JSON.stringify({ provider: 'claude' }),
   })
   assert.equal(logout.status, 200)
+  await logout.text()
   await Promise.race([
-    cancelled,
-    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Gateway stream was not cancelled')), 1500); timer.unref() }),
+    stopped,
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Gateway inference was not cancelled')), 1500); timer.unref() }),
   ])
   await reader.cancel()
-
-  assert.equal((await gateway(false)).status, 401)
-  assert.equal((await (await fetch(`${url}/health`)).json()).providers.claude.connected, false)
+  assert.equal((await (await fetch(url + '/api/status')).json()).connected, false)
+  assert.equal((await (await fetch(url + '/health')).json()).providers.claude.connected, false)
+  assert.equal((await post(prompt)).status, 401)
+  for (const [path, input] of [
+    ['/v1/chat/completions', body],
+    ['/v1/messages', { ...body, max_tokens: 10 }],
+    ['/v1/responses', { model: 'claude-test', input: 'Hi' }],
+  ]) {
+    const response = await call(path, input)
+    assert.equal(response.status, 401, path)
+    await response.text()
+  }
+  assert.equal(invoked, 1)
 })
 
 test('web server answers malformed request URLs with 400 and keeps running', async t => {

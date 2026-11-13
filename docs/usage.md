@@ -41,6 +41,8 @@ To require a local bearer / `x-api-key` token on `/v1/*` requests:
 npm start -- serve --port 4317 --gateway-key my-local-secret
 ```
 
+Prefer the `FRONTIER_GATEWAY_KEY` environment variable over `--gateway-key` so the key does not appear in process listings. The gateway refuses to bind a non-loopback `--host` (such as `0.0.0.0`) or allow a `*` CORS origin unless a key is set. At most 8 generations run at once; extra requests get `429`.
+
 ### Supported Endpoints
 
 | Endpoint | Protocol | Compatibility |
@@ -50,6 +52,12 @@ npm start -- serve --port 4317 --gateway-key my-local-secret
 | `POST /v1/chat/completions` | OpenAI Chat Completions (JSON & SSE) | OpenAI SDK, Cursor, Continue, Cline, OpenCode, curl |
 | `POST /v1/responses` | OpenAI Responses (JSON & SSE) | OpenAI Responses API clients |
 | `POST /v1/messages` | Anthropic Messages (JSON & SSE) | Anthropic SDK & Claude-compatible clients |
+
+Responses streaming emits content, reasoning-summary, and function-call lifecycle events for OpenAI SDK stream accumulation. When generation reaches its output-token limit, both JSON and SSE responses report `status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"`.
+
+### Tool selection
+
+OpenAI Chat Completions and Responses requests support `tool_choice: "auto"` (the default) and `tool_choice: "none"`. Anthropic Messages requests use `{ "type": "auto" }` or `{ "type": "none" }`. Selecting `none` removes tool definitions before invoking the provider. Required/forced tool choices, named tool choices, and additional Anthropic tool-choice options return `400`; these restrictions are never silently discarded.
 
 ### Model Routing Rules
 
@@ -65,6 +73,8 @@ npm run web
 ```
 
 Open **http://127.0.0.1:4317**.
+
+Logging out a provider disables both Web UI chat and the embedded gateway for that provider, including API-key mode, and cancels its active requests. Reconnect in the Web UI to enable it again. This does not revoke credentials in official provider apps or modify an API key in your environment.
 
 ## CLI Reference
 

@@ -40,6 +40,22 @@ const MAX_OUTPUT_TOKENS = 200_000
 const maxTokensOf = (value: unknown, name: string) => optionalNumber(value, name, 1, MAX_OUTPUT_TOKENS, true)
 const temperatureOf = (value: unknown) => optionalNumber(value, 'temperature', 0, 2)
 
+/** Never silently weaken a caller's tool restrictions: only auto and none are honoured. */
+function applyToolChoice(req: Record<string, unknown>, tools: ToolSchema[] | undefined, anthropic = false): ToolSchema[] | undefined {
+  if (req.tool_choice === undefined) return tools
+  let choice: unknown = req.tool_choice
+  if (anthropic) {
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice) ||
+        Object.keys(choice).some(key => key !== 'type')) {
+      throw new RequestError('Only tool_choice auto and none are supported.')
+    }
+    choice = (choice as Record<string, unknown>).type
+  }
+  if (choice === 'none') return undefined
+  if (choice === 'auto') return tools
+  throw new RequestError('Only tool_choice auto and none are supported; required and named tool choices are unsupported.')
+}
+
 function textFromParts(value: unknown): string {
   if (typeof value === 'string') return value
   if (!Array.isArray(value)) return ''
@@ -150,6 +166,7 @@ export function parseOpenAIChatRequest(body: unknown, explicitProvider?: Provide
     })
   }
 
+  tools = applyToolChoice(req, tools)
   const maxTokens = maxTokensOf(req.max_completion_tokens ?? req.max_tokens, 'max_tokens')
   const temperature = temperatureOf(req.temperature)
   const reasoningEffort = typeof req.reasoning_effort === 'string' && req.reasoning_effort ? req.reasoning_effort : undefined
@@ -254,6 +271,7 @@ export function parseAnthropicMessagesRequest(body: unknown, explicitProvider?: 
 
   const outputConfig = req.output_config && typeof req.output_config === 'object' ? req.output_config as Record<string, unknown> : undefined
   const reasoningEffort = typeof outputConfig?.effort === 'string' ? outputConfig.effort : undefined
+  tools = applyToolChoice(req, tools, true)
   const maxTokens = maxTokensOf(req.max_tokens, 'max_tokens') ?? 4096
   const temperature = temperatureOf(req.temperature)
   const stop = Array.isArray(req.stop_sequences) ? req.stop_sequences.filter((s): s is string => typeof s === 'string') : undefined
@@ -340,6 +358,7 @@ export function parseResponsesRequest(body: unknown, explicitProvider?: Provider
 
   const reasoning = req.reasoning && typeof req.reasoning === 'object' ? req.reasoning as Record<string, unknown> : undefined
   const reasoningEffort = typeof reasoning?.effort === 'string' ? reasoning.effort : undefined
+  tools = applyToolChoice(req, tools)
   const maxTokens = maxTokensOf(req.max_output_tokens, 'max_output_tokens')
   const temperature = temperatureOf(req.temperature)
 
