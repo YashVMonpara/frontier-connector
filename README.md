@@ -22,7 +22,7 @@ Frontier provides a clean, standalone bridge between your local applications and
 - **Universal Local API Gateway (`/v1/*`)**: Exposes standard OpenAI Chat Completions (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), and `/v1/models` endpoints on `127.0.0.1`. Any app or SDK that supports a custom base URL works directly with both providers.
 - **Programmatic TypeScript/ESM Client**: Import [`FrontierConnector`](src/connector.ts), [`ClaudeAdapter`](src/claude.ts), [`OpenAIAdapter`](src/openai.ts), or [`startGatewayServer`](src/gateway.ts) directly in Node.js apps.
 - **Local Web UI + CLI**: Sign in via browser OAuth (PKCE S256), check subscription limits, chat directly with streaming Markdown/reasoning output, or run headless with `frontier serve`.
-- **Safe Local Auth**: Private atomic credential files (`0600`), cross-process lockfiles for coordinated token rotation, and optional bearer/`x-api-key` protection for the local gateway.
+- **Safe Local Auth**: Private atomic credential files (`0600`), cross-process lockfiles for coordinated token rotation, and bearer/`x-api-key` protection for the local gateway (required whenever it is reachable beyond loopback).
 
 **Status: experimental.** Subscription integrations use undocumented provider endpoints. Account access and protocol compatibility can change. This is an independent project, unaffiliated with OpenAI or Anthropic.
 
@@ -60,7 +60,7 @@ Once `npm start -- serve` (or `npm run web`) is running on `http://127.0.0.1:431
 Point any OpenAI-compatible client (OpenAI SDK, Cursor, Continue, Cline, OpenCode, LangChain, Python scripts, curl) to:
 
 - **Base URL:** `http://127.0.0.1:4317/v1`
-- **API Key:** any placeholder (or your configured `--gateway-key` / `FRONTIER_GATEWAY_KEY`)
+- **API Key:** any placeholder, or your gateway key if you set `FRONTIER_GATEWAY_KEY` / `--gateway-key`
 - **Models:** `claude-sonnet-5`, `claude-opus-5`, `gpt-4o`, `o3`, or explicit `claude/<model>` / `openai/<model>` prefixes
 
 ```sh
@@ -71,6 +71,8 @@ curl http://127.0.0.1:4317/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello from an external app!"}]
   }'
 ```
+
+The OpenAI Responses API (`POST /v1/responses`) is supported too, including streaming; it emits the lifecycle events the official OpenAI SDKs expect and reports `status: "incomplete"` when the output-token limit is reached.
 
 ### Anthropic-compatible apps & SDKs
 
@@ -87,6 +89,20 @@ curl http://127.0.0.1:4317/v1/messages \
     "messages": [{"role": "user", "content": "Hello via Anthropic API!"}]
   }'
 ```
+
+### Tool calling
+
+Function tools work on all three protocols. `tool_choice` accepts `auto` (default) and `none` (Anthropic: `{ "type": "auto" }` / `{ "type": "none" }`). Forced or named tool choices return `400` rather than being silently ignored.
+
+### Securing the gateway
+
+The gateway binds to `127.0.0.1` and needs no key for local use. To protect it with a key, prefer the environment variable so the key stays out of process listings and shell history:
+
+```sh
+FRONTIER_GATEWAY_KEY=my-local-secret npm start -- serve
+```
+
+Clients then send `Authorization: Bearer my-local-secret` or `x-api-key: my-local-secret`. The gateway refuses to start on a non-loopback `--host` (for example `0.0.0.0`) or with a `*` CORS origin unless a key is set, because otherwise anyone on your network or any website could use your subscription.
 
 ## Programmatic SDK
 
@@ -131,6 +147,8 @@ scripts/         Release/package verification
 - Zero runtime npm dependencies (`node_modules` runtime footprint is empty; pure Node.js 22+).
 - Claude credentials default to `~/.config/frontier-connector/auth.json`; OpenAI uses `~/.config/frontier-connector/auth.json.openai`. Token files use mode `0600`; directories use `0700`.
 - The gateway and web server bind to `127.0.0.1` by default, validate `Host` headers against DNS rebinding, and block unauthorized cross-origin browser requests.
+- At most 8 generations run at once (extra requests get `429`); `max_tokens` is capped at 200,000 and `temperature` must be 0–2.
+- Logging out a provider in the Web UI also disables it on the embedded gateway (including API-key mode) and cancels its in-flight requests. It does not revoke tokens in official provider apps.
 - For vulnerability reporting, see [SECURITY.md](SECURITY.md).
 
 ## Development
@@ -140,7 +158,7 @@ npm ci
 npm run verify
 ```
 
-The test suite covers credential isolation, refresh concurrency, OAuth callbacks, request authentication, stream framing, tool-call translation, connector routing, HTTP API gateway protocols, cancellation, and independent logout. Tests use temporary files and mocked provider responses; no live account is required. CI runs on Node 22 and 24.
+The test suite covers credential isolation, refresh concurrency, OAuth callbacks, request authentication, stream framing, tool-call translation, connector routing, HTTP API gateway protocols (checked against the official `openai` SDK), malformed-request and crash resistance, network-exposure guards, cancellation, and independent logout. Tests use temporary files and mocked provider responses; no live account is required. CI runs on Node 22 and 24.
 
 ## License and credits
 
