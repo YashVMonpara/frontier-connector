@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { ClaudeAdapter } from '../dist/claude.js'
 import { TokenManager } from '../dist/auth/manager.js'
 import { retryDelay } from '../dist/transport.js'
-import { apply } from '../dist/index.js'
 import { fixture, session, sse, options, collect } from './helpers.mjs'
 
 test('subscription transport sets the expected auth, identity and streaming headers', async t => {
@@ -144,7 +143,7 @@ test('image input fails explicitly without an attachment resolver', async () => 
   const adapter = new ClaudeAdapter({ authMode: 'api-key', apiKey: 'fake', fetchFn: async () => { fetched = true; return sse() } })
   const input = options()
   input.messages[0] = { ...input.messages[0], content: [...input.messages[0].content, { type: 'image', attachment: { attachmentId: 'fake' } }] }
-  await assert.rejects(collect(adapter.stream(input)), /no attachments service/)
+  await assert.rejects(collect(adapter.stream(input)), /no attachment resolver/)
   assert.equal(fetched, false)
 })
 
@@ -162,16 +161,25 @@ test('attachment-backed images are resolved into the request', async () => {
   await collect(adapter.stream(input))
 })
 
-test('DSH plugin registers configurable Claude and OpenAI routes with disposal handles', () => {
-  const registered = [], cleanups = []
-  const ctx = {
-    llm: { registerAdapter(routes, adapter) { registered.push([routes, adapter]); return () => cleanups.push(routes[0]) } },
-    effect(fn) { cleanups.push(fn()) },
+test('inline base64 and data URL images work directly without an attachment resolver', async () => {
+  let blocks
+  const adapter = new ClaudeAdapter({ authMode: 'api-key', apiKey: 'fake',
+    fetchFn: async (url, init) => {
+      blocks = JSON.parse(init.body).messages[0].content.filter(b => b.type === 'image')
+      return sse()
+    },
+  })
+  const input = options()
+  input.messages[0] = {
+    ...input.messages[0],
+    content: [
+      ...input.messages[0].content,
+      { type: 'image', mediaType: 'image/png', dataBase64: 'AQID' },
+      { type: 'image', url: 'data:image/jpeg;base64,BAUG' },
+    ],
   }
-  apply(ctx, { route: 'frontier', openaiRoute: 'openai-frontier' })
-  assert.deepEqual(registered.map(([routes]) => routes), [['frontier'], ['openai-frontier']])
-  assert.ok(registered[0][1] instanceof ClaudeAdapter)
-  for (const cleanup of cleanups.filter(value => typeof value === 'function')) cleanup()
-  assert.ok(cleanups.includes('frontier'))
-  assert.ok(cleanups.includes('openai-frontier'))
+  await collect(adapter.stream(input))
+  assert.equal(blocks.length, 2)
+  assert.deepEqual(blocks[0].source, { type: 'base64', media_type: 'image/png', data: 'AQID' })
+  assert.deepEqual(blocks[1].source, { type: 'base64', media_type: 'image/jpeg', data: 'BAUG' })
 })

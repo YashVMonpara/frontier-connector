@@ -12,14 +12,14 @@ import {
   isQuotaExceededError,
   LlmError,
   QUOTA_EXCEEDED_CODE,
-} from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '../compat.js'
+  ToolCallId,
+} from '../types.js'
 import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
   ToolSchema,
-} from '@deepseek-ai/dsh-llm'
+} from '../types.js'
 import { parseSse } from './sse.js'
 import { withToolResultImages } from './resolved.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'

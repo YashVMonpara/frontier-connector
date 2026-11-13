@@ -4,7 +4,7 @@ import { get } from 'node:http'
 import { startWebServer } from '../dist/web-server.js'
 import { fixture, session } from './helpers.mjs'
 
-async function web(t, overrides = {}, agentRuntime = false) {
+async function web(t, overrides = {}, config = {}) {
   const { store } = await fixture(t)
   await store.save(session())
   const calls = []
@@ -19,7 +19,7 @@ async function web(t, overrides = {}, agentRuntime = false) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     }, ...overrides,
   }
-  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path }, adapter, agentRuntime })
+  const { server, url } = await startWebServer({ port: 0, config: { authFile: store.path, ...config }, adapter })
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections() }))
   const status = await (await fetch(`${url}/api/status`)).json()
   const post = (body, headers = {}) => fetch(`${url}/api/chat`, {
@@ -30,10 +30,12 @@ async function web(t, overrides = {}, agentRuntime = false) {
 
 const prompt = { model: 'test-model', messages: [{ role: 'user', text: 'Hello' }] }
 
-test('web status exposes connection and model information but never credential values', async t => {
+test('web status exposes connection, gateway endpoints and model information but never credential values', async t => {
   const { url, status } = await web(t)
   assert.equal(status.connected, true)
   assert.equal(status.models[0].id, 'test-model')
+  assert.equal(status.gateway.endpoints.openai, `${url}/v1`)
+  assert.equal(status.gateway.endpoints.anthropic, url)
   assert.ok(!JSON.stringify(status).includes('fake-access-token'))
   assert.ok(!JSON.stringify(status).includes('fake-refresh-token'))
   const page = await fetch(url)
@@ -41,6 +43,10 @@ test('web status exposes connection and model information but never credential v
   assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/)
   assert.match(await page.text(), /Where should we start/)
   assert.equal((await fetch(`${url}/src/auth/store.ts`)).status, 404)
+  const modelsRes = await fetch(`${url}/v1/models`)
+  assert.equal(modelsRes.status, 200)
+  const modelsData = await modelsRes.json()
+  assert.equal(modelsData.data[0].id, 'test-model')
 })
 
 test('web chat streams multiple turns through the existing adapter', async t => {
@@ -92,53 +98,6 @@ test('disconnecting the web stream cancels the provider request', async t => {
   await Promise.race([stopped, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Provider was not cancelled')), 1500); timer.unref() })])
 })
 
-test('web chat runs through the complete agent runtime when enabled', async t => {
-  const calls = []
-  const runtime = {
-    async run(input) {
-      calls.push(input)
-      input.onActivity({ kind: 'tool-call', sessionId: input.sessionId, callId: 'call-1', name: 'read', arguments: '{"file_path":"package.json"}' })
-      input.onActivity({ kind: 'tool-result', sessionId: input.sessionId, callId: 'call-1', output: 'package contents', isError: false })
-      return { text: 'Agent completed the task', events: [{ type: 'tool/result' }] }
-    },
-    async close() {},
-  }
-  const { post, status } = await web(t, {}, runtime)
-  assert.equal(status.agentRuntime.enabled, true)
-  assert.ok(status.agentRuntime.capabilities.includes('agent-loop'))
-  const response = await post({
-    ...prompt, sessionId: 'frontier_test_session', bootstrap: true, system: 'Be concise',
-    messages: [{ role: 'user', text: 'Earlier' }, { role: 'assistant', text: 'Context' }, { role: 'user', text: 'Do the task' }],
-  })
-  const chunks = (await response.text()).trim().split('\n').map(JSON.parse)
-  assert.equal(chunks[0].type, 'agent-event')
-  assert.equal(chunks[0].event.name, 'read')
-  assert.equal(chunks[1].event.output, 'package contents')
-  assert.equal(chunks[2].text, 'Agent completed the task')
-  assert.equal(chunks.at(-1).reason.kind, 'stop')
-  assert.equal(calls[0].sessionId, 'frontier_test_session')
-  assert.match(calls[0].prompt, /Earlier conversation imported/)
-  assert.match(calls[0].prompt, /Current user request:\nDo the task/)
-})
-
-test('web status exposes workspace cwd and post /api/workspace switches it', async t => {
-  const { url, status } = await web(t)
-  assert.ok(status.workspace?.cwd)
-  const postWs = (body, token = status.csrf) => fetch(`${url}/api/workspace`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-frontier-token': token }, body: JSON.stringify(body),
-  })
-  // Invalid path
-  const badRes = await postWs({ cwd: '/nonexistent_frontier_path_xyz_123' })
-  assert.equal(badRes.status, 400)
-
-  // Valid path (tmpdir)
-  const { tmpdir } = await import('node:os')
-  const validRes = await postWs({ cwd: tmpdir() })
-  assert.equal(validRes.status, 200)
-  const data = await validRes.json()
-  assert.equal(data.ok, true)
-})
-
 test('web app markdown pattern matches bold and italic words containing n', async () => {
   const { readFile } = await import('node:fs/promises')
   const appJs = await readFile('web/app.js', 'utf8')
@@ -147,4 +106,66 @@ test('web app markdown pattern matches bold and italic words containing n', asyn
   assert.ok('**conversation**'.match(pattern), 'bold word with n must match')
   assert.ok('**new**'.match(pattern), 'bold new must match')
   assert.ok('*function*'.match(pattern), 'italic function must match')
+})
+
+test('API-key logout cancels gateway inference and disables every gateway protocol', async t => {
+  let invoked = 0
+  let cancelled
+  const stopped = new Promise(resolve => { cancelled = resolve })
+  const { url, status, post } = await web(t, {
+    async *stream(input) {
+      invoked++
+      yield { type: 'text-delta', index: 0, text: 'Started' }
+      await new Promise(resolve => {
+        const stop = () => { cancelled(); resolve() }
+        if (input.signal.aborted) stop()
+        else input.signal.addEventListener('abort', stop, { once: true })
+      })
+    },
+  }, { authMode: 'api-key', apiKey: 'fake-test-api-key' })
+  const call = (path, body) => fetch(url + path, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  })
+  const body = { model: 'claude-test', messages: [{ role: 'user', content: 'Hi' }] }
+  const active = await call('/v1/chat/completions', { ...body, stream: true })
+  const reader = active.body.getReader()
+  await reader.read()
+  const logout = await fetch(url + '/api/auth/logout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-frontier-token': status.csrf },
+    body: JSON.stringify({ provider: 'claude' }),
+  })
+  assert.equal(logout.status, 200)
+  await logout.text()
+  await Promise.race([
+    stopped,
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Gateway inference was not cancelled')), 1500); timer.unref() }),
+  ])
+  await reader.cancel()
+  assert.equal((await (await fetch(url + '/api/status')).json()).connected, false)
+  assert.equal((await (await fetch(url + '/health')).json()).providers.claude.connected, false)
+  assert.equal((await post(prompt)).status, 401)
+  for (const [path, input] of [
+    ['/v1/chat/completions', body],
+    ['/v1/messages', { ...body, max_tokens: 10 }],
+    ['/v1/responses', { model: 'claude-test', input: 'Hi' }],
+  ]) {
+    const response = await call(path, input)
+    assert.equal(response.status, 401, path)
+    await response.text()
+  }
+  assert.equal(invoked, 1)
+})
+
+test('web server answers malformed request URLs with 400 and keeps running', async t => {
+  const { url } = await web(t)
+  const { hostname, port } = new URL(url)
+  const { connect } = await import('node:net')
+  const status = await new Promise((resolve, reject) => {
+    const socket = connect(Number(port), hostname, () => socket.write(`GET //[ HTTP/1.1\r\nHost: ${hostname}:${port}\r\nConnection: close\r\n\r\n`))
+    let data = ''
+    socket.on('data', chunk => { data += chunk }); socket.on('end', () => resolve(Number(data.split(' ')[1]))); socket.on('error', reject)
+  })
+  assert.equal(status, 400)
+  assert.equal((await fetch(`${url}/api/status`)).status, 200)
 })

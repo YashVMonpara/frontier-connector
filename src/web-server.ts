@@ -1,15 +1,13 @@
-import { RequestError, agentPrompt, providerOf, validateChat } from './http/chat.js'
-import type { Provider } from './http/chat.js'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { statSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
-import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createAssistantMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { RequestError, providerOf, validateChat } from './http/chat.js'
+import type { Provider } from './http/chat.js'
+import { createAssistantMessage, createUserMessage, ReasoningEffortId } from './types.js'
+import type { ConnectorAdapter, GenerateOptions } from './types.js'
 import { ClaudeAdapter } from './claude.js'
 import type { ConnectorOptions } from './claude.js'
 import { TokenStore, atomicPrivateWrite } from './auth/store.js'
@@ -18,21 +16,21 @@ import type { LoginAttempt } from './auth/oauth.js'
 import { beginOpenAILogin, openaiStore } from './auth/openai.js'
 import { OpenAIAdapter } from './openai.js'
 import type { OpenAIOptions } from './openai.js'
-import { HARNESS_VERSION, HarnessAgentRuntime } from './agent-runtime.js'
-import type { AgentRuntime } from './agent-runtime.js'
+import { FrontierConnector } from './connector.js'
+import { assertSafeExposure, failSafe, handleGatewayRequest } from './gateway.js'
 
 interface LoginJob { state: 'starting' | 'waiting' | 'connected' | 'error'; attempt?: LoginAttempt; error?: string }
 
-
-interface WebOptions {
+export interface WebOptions {
   port?: number
-  cwd?: string
   config?: ConnectorOptions & { openai?: OpenAIOptions }
-  adapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
-  openaiAdapter?: Pick<ClaudeAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
+  adapter?: Pick<ConnectorAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
+  openaiAdapter?: Pick<ConnectorAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>
   loginFactory?: (provider: Provider) => Promise<LoginAttempt>
-  /** `false` retains the adapter-only path for embedding/tests. */
-  agentRuntime?: AgentRuntime | false
+  gatewayKey?: string
+  allowCorsOrigins?: readonly string[]
+  /** Maximum simultaneous `/v1/*` inference requests (default 8). */
+  maxGatewayRequests?: number
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -65,19 +63,37 @@ async function send(res: ServerResponse, value: unknown, signal: AbortSignal) {
   })
 }
 
-/** Loopback-only UI. Provider credentials never leave the Node process. */
+/** Loopback-only connector UI + OpenAI/Anthropic compatible `/v1/*` API gateway. */
 export async function startWebServer(options: WebOptions = {}) {
   const port = options.port ?? 4317
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Port must be between 0 and 65535.')
+  const gatewayKey = options.gatewayKey ?? process.env.FRONTIER_GATEWAY_KEY
+  assertSafeExposure('127.0.0.1', gatewayKey, options.allowCorsOrigins)
+  const gatewayLimiter = { active: 0, max: options.maxGatewayRequests ?? 8 }
+  if (!Number.isInteger(gatewayLimiter.max) || gatewayLimiter.max < 1) throw new Error('maxGatewayRequests must be a positive integer.')
   const config = options.config ?? {}
   const adapter = options.adapter ?? new ClaudeAdapter(config)
   const store = new TokenStore(config.authFile)
   const openaiConfig = { ...config.openai, authFile: config.openai?.authFile ?? (config.authFile ? `${config.authFile}.openai` : undefined), resolveAttachments: config.resolveAttachments }
   const openai = options.openaiAdapter ?? new OpenAIAdapter(openaiConfig)
   const adapters = { claude: adapter, openai }
-  const agentRuntime = options.agentRuntime === false ? undefined : options.agentRuntime ?? new HarnessAgentRuntime({ cwd: options.cwd })
   const stores = { claude: store, openai: openaiStore(openaiConfig.authFile) }
   if (stores.claude.path === stores.openai.path) throw new Error('Claude and OpenAI require separate credential files.')
+  const toAdapter = (
+    target: Pick<ConnectorAdapter, 'stream' | 'listModels' | 'resolveModel' | 'usage'>,
+    name: string,
+  ): ConnectorAdapter => ({
+    providerInfo: id => ({ id, name }),
+    listModels: p => target.listModels(p),
+    resolveModel: (p, m) => target.resolveModel(p, m),
+    usage: () => target.usage(),
+    stream: opts => target.stream(opts),
+  })
+  const connector = new FrontierConnector({
+    config,
+    claude: toAdapter(adapter, 'Claude'),
+    openai: toAdapter(openai, 'OpenAI'),
+  })
   const logins = new Map<Provider, LoginJob>()
   const streams = new Map<AbortController, Provider>()
   const modeOf = (provider: Provider) => provider === 'claude' ? config.authMode ?? 'subscription' : 'subscription'
@@ -92,12 +108,30 @@ export async function startWebServer(options: WebOptions = {}) {
     ['/', ['index.html', 'text/html; charset=utf-8']],
     ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
     ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
-    ['/runtime.css', ['runtime.css', 'text/css; charset=utf-8']],
     ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
   ])
   let origin = ''
+  let boundPort = port
   let active = 0
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => { void handle(req, res).catch(error => failSafe(res, error)) })
+  const handle = async (req: IncomingMessage, res: ServerResponse) => {
+    // Allow external apps to call /health and /v1/* directly on the same server.
+    // The gateway shares the UI's readiness check and stream registry, so a UI
+    // logout also disables and cancels gateway traffic for that provider.
+    if (await handleGatewayRequest(req, res, {
+      connector,
+      boundHost: '127.0.0.1',
+      boundPort,
+      localOrigin: origin,
+      gatewayKey,
+      allowCorsOrigins: options.allowCorsOrigins,
+      isConnected: connected,
+      streams,
+      limiter: gatewayLimiter,
+    })) {
+      return
+    }
+
     res.setHeader('cache-control', 'no-store')
     res.setHeader('x-content-type-options', 'nosniff')
     res.setHeader('referrer-policy', 'no-referrer')
@@ -139,32 +173,23 @@ export async function startWebServer(options: WebOptions = {}) {
         }
         json(res, {
           csrf, ...providers.claude, providers,
-          workspace: { cwd: agentRuntime?.getCwd?.() ?? options.cwd ?? process.cwd() },
-          agentRuntime: {
-            enabled: Boolean(agentRuntime), profile: agentRuntime ? 'sdk' : null, version: agentRuntime ? HARNESS_VERSION : null,
-            capabilities: agentRuntime ? ['agent-loop', 'filesystem', 'shell', 'skills', 'goals', 'subagents', 'compaction'] : [],
+          gateway: {
+            url: origin,
+            endpoints: {
+              openai: `${origin}/v1`,
+              anthropic: origin,
+              responses: `${origin}/v1/responses`,
+              models: `${origin}/v1/models`,
+            },
+            authRequired: Boolean(gatewayKey),
           },
         })
         return
       }
-      const routes = ['/api/chat', '/api/usage', '/api/auth/login', '/api/auth/logout', '/api/auth/cancel', '/api/auth/callback', '/api/workspace']
+      const routes = ['/api/chat', '/api/usage', '/api/auth/login', '/api/auth/logout', '/api/auth/cancel', '/api/auth/callback']
       if (req.method !== 'POST' || !routes.includes(path)) throw new RequestError('Not found.', 404)
       const token = req.headers['x-frontier-token']
       if (typeof token !== 'string' || Buffer.byteLength(token) !== Buffer.byteLength(csrf) || !timingSafeEqual(Buffer.from(token), Buffer.from(csrf))) throw new RequestError('Refresh this page to reconnect.', 403)
-      if (path === '/api/workspace') {
-        const body = await readJson(req) as { cwd?: unknown }
-        if (typeof body?.cwd !== 'string' || !body.cwd.trim()) throw new RequestError('Workspace path is required.')
-        const target = resolve(body.cwd.trim())
-        try {
-          const st = statSync(target)
-          if (!st.isDirectory()) throw new RequestError('Workspace path must be a directory.')
-        } catch (err) {
-          if (err instanceof RequestError) throw err
-          throw new RequestError('Workspace directory does not exist or is inaccessible.')
-        }
-        if (agentRuntime?.setCwd) await agentRuntime.setCwd(target)
-        json(res, { ok: true, cwd: target }); return
-      }
       if (path.startsWith('/api/auth/')) {
         const body = await readJson(req) as { provider?: unknown; callback?: unknown }
         const provider = providerOf(body?.provider), target = stores[provider]
@@ -176,10 +201,10 @@ export async function startWebServer(options: WebOptions = {}) {
           const job = logins.get(provider); logins.delete(provider); job?.attempt?.cancel()
           if (path === '/api/auth/cancel' && job && ['starting', 'waiting'].includes(job.state)) await target.clear()
           if (path === '/api/auth/logout') {
-            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
-            await agentRuntime?.disconnect?.(provider)
-            // Persist disabling for API-key mode without modifying environment secrets.
+            // Persist disabling first (API-key mode keeps its environment secret),
+            // so no new UI or gateway request can start after the abort sweep.
             await atomicPrivateWrite(`${target.path}.web-disabled`, true)
+            for (const [controller, owner] of streams) if (owner === provider) controller.abort(new Error('Logged out.'))
             await target.clear()
             if (provider === 'openai' && openai instanceof OpenAIAdapter) openai.invalidate()
           }
@@ -223,26 +248,6 @@ export async function startWebServer(options: WebOptions = {}) {
       try {
         res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'x-accel-buffering': 'no' })
         res.flushHeaders()
-        if (agentRuntime) {
-          if (!input.sessionId) throw new RequestError('Refresh the page to start an agent session.')
-          const activityWrites: Promise<void>[] = []
-          const result = await agentRuntime.run({
-            sessionId: input.sessionId, provider, model: input.model,
-            prompt: agentPrompt(input), maxTokens: input.maxTokens,
-            effort: input.effort, signal: abort.signal,
-            onActivity: event => {
-              activityWrites.push(send(res, { type: 'agent-event', event }, abort.signal).catch(error => {
-                if (!abort.signal.aborted) abort.abort(error)
-              }))
-            },
-          })
-          await Promise.all(activityWrites)
-          abort.signal.throwIfAborted()
-          if (!result.text) throw new Error('The DeepSeek Harness agent completed without a final response.')
-          await send(res, { type: 'text-delta', index: 0, text: result.text }, abort.signal)
-          await send(res, { type: 'finish', reason: { kind: 'stop' } }, abort.signal)
-          return
-        }
         const request: GenerateOptions = {
           provider, model: input.model, signal: abort.signal,
           system: input.system, maxTokens: input.maxTokens ?? 4096,
@@ -264,13 +269,14 @@ export async function startWebServer(options: WebOptions = {}) {
       if (!res.destroyed && !res.headersSent) json(res, { error: error instanceof Error ? error.message : 'Request failed.' }, error instanceof RequestError ? error.status : 500)
       else res.end()
     }
-  })
-  server.on('close', () => { for (const job of logins.values()) job.attempt?.cancel(); logins.clear(); for (const controller of streams.keys()) controller.abort(); void agentRuntime?.close() })
+  }
+  server.on('close', () => { for (const job of logins.values()) job.attempt?.cancel(); logins.clear(); for (const controller of streams.keys()) controller.abort() })
   server.requestTimeout = 30_000
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve() })
   })
-  origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-  return { server, url: origin }
+  boundPort = (server.address() as AddressInfo).port
+  origin = `http://127.0.0.1:${boundPort}`
+  return { server, url: origin, connector }
 }

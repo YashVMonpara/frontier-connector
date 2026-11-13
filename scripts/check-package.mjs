@@ -7,10 +7,24 @@ const output = execFileSync(npm, ['pack', '--dry-run', '--json', '--ignore-scrip
 const manifest = JSON.parse(output)
 const [{ files }] = Array.isArray(manifest) ? manifest : Object.values(manifest)
 const paths = files.map(file => file.path)
-for (const required of ['LICENSE', 'THIRD_PARTY_LICENSES', 'dist/index.js', 'dist/cli.js',
-  'dist/runtime/harness.js', 'dist/runtime/activity.js', 'dist/http/chat.js',
-  'web/index.html', 'web/app.js', 'web/runtime.css', 'frontier-agent.patch.yml']) {
+for (const required of [
+  'LICENSE',
+  'THIRD_PARTY_LICENSES',
+  'dist/index.js',
+  'dist/cli.js',
+  'dist/connector.js',
+  'dist/gateway.js',
+  'dist/types.js',
+  'dist/http/chat.js',
+  'dist/http/gateway-translate.js',
+  'web/index.html',
+  'web/app.js',
+  'web/styles.css',
+]) {
   assert.ok(paths.includes(required), `Package is missing ${required}`)
+}
+for (const forbidden of ['cordis.patch.yml', 'frontier-agent.patch.yml', 'dist/agent-runtime.js', 'web/runtime.css']) {
+  assert.ok(!paths.includes(forbidden), `Removed DSH artifact still in package: ${forbidden}`)
 }
 for (const path of paths) {
   assert.ok(!/(^|\/)(?:\.env(?:\.|$)|auth\.json|node_modules|\.git|\.lavish)(\/|$|\.)/.test(path), `Private file in package: ${path}`)

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '../dist/types.js'
 import { TokenStore } from '../dist/auth/store.js'
 
 export const session = (overrides = {}) => ({
